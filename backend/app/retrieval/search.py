@@ -53,7 +53,7 @@ class RetrievalService:
 
         # FAISS search
         try:
-            raw_results = search_index(domain, query_embedding, top_k=top_k * 2)
+            raw_results = search_index(domain, query_embedding, top_k=max(top_k * 10, 50))
         except Exception as e:
             logger.error(f"FAISS search failed: {e}")
             # Fallback to metadata-only filtering
@@ -68,7 +68,11 @@ class RetrievalService:
 
         # Apply metadata filters
         if filters:
-            records = self._apply_filters(records, filters)
+            filtered = self._apply_filters(records, filters)
+            if filtered:
+                records = filtered
+            else:
+                logger.info(f"Strict filters {filters} yielded 0 results for {domain}, retaining top semantic matches")
 
         # Limit to top_k
         results = records[:top_k]

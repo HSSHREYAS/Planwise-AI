@@ -29,12 +29,20 @@ def search_attraction(
     Returns:
         ToolResult with matching attraction records
     """
+    # Normalize interests to list of strings
+    interest_list: List[str] = []
+    if interests:
+        if isinstance(interests, str):
+            interest_list = [interests.strip()] if interests.strip() else []
+        elif isinstance(interests, list):
+            interest_list = [str(i).strip() for i in interests if i]
+
     # Build search query
     query_parts = ["attraction"]
     if location:
-        query_parts.append(location)
-    if interests:
-        query_parts.extend(interests)
+        query_parts.append(str(location).strip())
+    if interest_list:
+        query_parts.extend(interest_list)
     query = " ".join(query_parts)
 
     # Build metadata filters
@@ -49,7 +57,7 @@ def search_attraction(
                 if a in loc_lower:
                     filters["area"] = a
                     break
-    if interests:
+    if interest_list:
         # Map interests to MultiWOZ attraction types
         type_map = {
             "museum": "museum",
@@ -68,7 +76,7 @@ def search_attraction(
             "nature": "park",
             "sports": "swimmingpool",
         }
-        for interest in interests:
+        for interest in interest_list:
             mapped = type_map.get(interest.lower())
             if mapped:
                 filters["type"] = mapped

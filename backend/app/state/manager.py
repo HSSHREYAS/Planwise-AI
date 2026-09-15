@@ -217,6 +217,10 @@ class StateManager:
     def get_state_summary(state: PlanState) -> str:
         """Short state summary for constraint and plan contexts."""
         parts = []
+        if state.goal:
+            parts.append(f"Goal: {state.goal}")
+        if state.intent:
+            parts.append(f"Intent: {state.intent}")
         if state.location:
             parts.append(f"Location: {state.location}")
         if state.duration_days is not None:

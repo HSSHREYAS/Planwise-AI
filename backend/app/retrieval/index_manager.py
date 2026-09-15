@@ -116,6 +116,8 @@ def get_all_records(domain: str) -> List[Dict[str, Any]]:
             # Try loading directly from processed data
             from app.config import PROCESSED_DATA_DIR
             data_path = Path(PROCESSED_DATA_DIR) / f"{domain}s.json"
+            if not data_path.exists():
+                data_path = Path(PROCESSED_DATA_DIR) / f"{domain}.json"
             if data_path.exists():
                 with open(data_path, "r", encoding="utf-8") as f:
                     return json.load(f)

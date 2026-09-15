@@ -448,11 +448,11 @@ class PlanningAgent:
         intent = "general_query"
         is_mod = False
 
-        if any(w in msg_lower for w in ["hotel", "stay", "accommodation"]):
+        if any(w in msg_lower for w in ["hotel", "stay", "accommodation", "guesthouse", "b&b"]):
             intent = "hotel_search"
-        elif any(w in msg_lower for w in ["restaurant", "food", "eat", "dining"]):
+        elif any(w in msg_lower for w in ["restaurant", "food", "eat", "dining", "lunch", "dinner"]):
             intent = "restaurant_search"
-        elif any(w in msg_lower for w in ["attraction", "visit", "see", "place"]):
+        elif any(w in msg_lower for w in ["attraction", "visit", "see", "place", "museum", "park"]):
             intent = "attraction_search"
         elif any(w in msg_lower for w in ["train", "taxi", "transport", "travel"]):
             intent = "transport_search"
@@ -466,18 +466,51 @@ class PlanningAgent:
                                          "update", "instead", "actually"]):
             is_mod = state.current_plan is not None
 
-        # Extract budget
+        # Extract location
+        location = None
+        if "cambridge" in msg_lower:
+            location = "cambridge"
+        elif "london" in msg_lower:
+            location = "london"
+        elif state.location:
+            location = state.location
+
+        # Extract budget: MUST have budget keywords or explicit currency symbol
+        # Prevents "2 day" or "Day 1" from being captured as budget
         budget = None
         import re
-        budget_match = re.search(r'[₹$]?\s*(\d[\d,]*)', message)
+        budget_match = re.search(
+            r'(?:[₹$£]|(?:budget|cost|spend|price|under|max)\s*(?:of|is|around|about)?\s*[₹$£]?)\s*(\d[\d,]*)',
+            message,
+            re.IGNORECASE,
+        )
+        if not budget_match:
+            budget_match = re.search(
+                r'(\d[\d,]*)\s*(?:rupees|inr|rs|dollars|pounds|bucks)',
+                message,
+                re.IGNORECASE,
+            )
         if budget_match:
-            budget = float(budget_match.group(1).replace(",", ""))
+            try:
+                budget = float(budget_match.group(1).replace(",", ""))
+            except ValueError:
+                budget = None
 
-        # Extract duration
+        # Extract duration (supports "3 days", "3-day", "3day", "weekend", etc.)
         duration = None
-        duration_match = re.search(r'(\d+)\s*(?:day|days)', msg_lower)
+        duration_match = re.search(r'(\d+)\s*[-_]?\s*(?:day|days)', msg_lower)
         if duration_match:
             duration = int(duration_match.group(1))
+        elif "weekend" in msg_lower:
+            duration = 2
+        elif "one day" in msg_lower or "1 day" in msg_lower or "1-day" in msg_lower:
+            duration = 1
+        elif "two days" in msg_lower or "2 days" in msg_lower or "2-day" in msg_lower:
+            duration = 2
+        elif "three days" in msg_lower or "3 days" in msg_lower or "3-day" in msg_lower:
+            duration = 3
+        elif state.duration_days:
+            duration = state.duration_days
 
         # Extract preferences
         preferences = []
@@ -486,6 +519,7 @@ class PlanningAgent:
 
         return IntentResult(
             intent=intent,
+            location=location,
             budget=budget,
             duration_days=duration,
             preferences=preferences,
@@ -526,6 +560,18 @@ class PlanningAgent:
 
     def _decompose(self, state: PlanState) -> List[Task]:
         """DECOMPOSING state: Break goal into subtasks."""
+        location = state.location or "cambridge"
+
+        # Deterministic mapping for single-domain searches (no LLM hallucinations)
+        if state.intent == "hotel_search":
+            return [Task(task_type="hotel_search", parameters={"location": location, "budget": state.budget, "preferences": state.preferences})]
+        if state.intent == "restaurant_search":
+            return [Task(task_type="restaurant_search", parameters={"location": location, "budget": state.budget, "preferences": state.preferences})]
+        if state.intent == "attraction_search":
+            return [Task(task_type="attraction_search", parameters={"location": location, "interests": state.interests})]
+        if state.intent == "transport_search":
+            return [Task(task_type="transport_search", parameters={"location": location})]
+
         state_summary = self.state_manager.get_state_summary(state)
         prompt = decomposition_prompt(state_summary)
 

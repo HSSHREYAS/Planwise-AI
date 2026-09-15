@@ -12,7 +12,7 @@ from datetime import datetime
 from enum import Enum
 from typing import Any, Dict, List, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 
 # ── Agent States ────────────────────────────────────────────────
@@ -70,6 +70,50 @@ class IntentResult(BaseModel):
     is_modification: bool = Field(default=False, description="True if modifying existing plan")
     raw_changes: Optional[Dict[str, Any]] = Field(default=None, description="Detected changes for replanning")
 
+    @field_validator("preferences", "interests", mode="before")
+    @classmethod
+    def coerce_list(cls, v):
+        if v is None:
+            return []
+        if isinstance(v, str):
+            clean = v.strip()
+            return [clean] if clean and clean.lower() not in ("null", "none", "") else []
+        if isinstance(v, list):
+            return [str(x).strip() for x in v if x not in (None, "null", "None", "")]
+        return []
+
+    @field_validator("location", mode="before")
+    @classmethod
+    def coerce_location(cls, v):
+        if v in (None, "null", "None", ""):
+            return None
+        return str(v).strip()
+
+    @field_validator("budget", mode="before")
+    @classmethod
+    def coerce_budget(cls, v):
+        if v in (None, "null", "None", ""):
+            return None
+        if isinstance(v, (int, float)):
+            return float(v)
+        import re
+        clean = re.sub(r"[^\d.]", "", str(v))
+        try:
+            return float(clean) if clean else None
+        except ValueError:
+            return None
+
+    @field_validator("duration_days", mode="before")
+    @classmethod
+    def coerce_duration(cls, v):
+        if v in (None, "null", "None", ""):
+            return None
+        if isinstance(v, (int, float)):
+            return int(v)
+        import re
+        clean = re.findall(r"\d+", str(v))
+        return int(clean[0]) if clean else None
+
 
 # ── Tasks ───────────────────────────────────────────────────────
 
@@ -111,6 +155,39 @@ class PlanActivity(BaseModel):
     duration_minutes: Optional[int] = None
     details: Dict[str, Any] = Field(default_factory=dict)
 
+    @field_validator("estimated_cost", mode="before")
+    @classmethod
+    def coerce_cost(cls, v):
+        if v in (None, "null", "None", ""):
+            return None
+        if isinstance(v, (int, float)):
+            return float(v)
+        str_v = str(v).strip().lower()
+        if str_v in ("free", "0", "zero", "?", "unknown", "n/a"):
+            return 0.0 if "free" in str_v or str_v == "0" else None
+        import re
+        clean = re.sub(r"[^\d.]", "", str_v)
+        try:
+            return float(clean) if clean else None
+        except ValueError:
+            return None
+
+    @field_validator("duration_minutes", mode="before")
+    @classmethod
+    def coerce_duration_minutes(cls, v):
+        if v in (None, "null", "None", ""):
+            return None
+        if isinstance(v, (int, float)):
+            return int(v)
+        import re
+        clean = re.findall(r"\d+", str(v))
+        if clean:
+            val = int(clean[0])
+            if "hour" in str(v).lower():
+                val *= 60
+            return val
+        return None
+
 
 class PlanTimeSlot(BaseModel):
     """A time slot within a day (morning, afternoon, evening)."""
@@ -132,6 +209,20 @@ class Plan(BaseModel):
     estimated_total_cost: Optional[float] = None
     assumptions: List[str] = Field(default_factory=list)
     plan_type: str = Field(default="trip", description="trip or study")
+
+    @field_validator("estimated_total_cost", mode="before")
+    @classmethod
+    def coerce_total_cost(cls, v):
+        if v in (None, "null", "None", ""):
+            return None
+        if isinstance(v, (int, float)):
+            return float(v)
+        import re
+        clean = re.sub(r"[^\d.]", "", str(v))
+        try:
+            return float(clean) if clean else None
+        except ValueError:
+            return None
 
 
 # ── Validation ──────────────────────────────────────────────────

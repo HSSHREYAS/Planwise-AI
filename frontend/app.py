@@ -563,6 +563,51 @@ for msg in st.session_state.messages:
     with st.chat_message(msg["role"]):
         st.markdown(msg["content"])
 
+# Show detailed plan if one exists in state
+if st.session_state.current_plan and st.session_state.current_plan.get("days"):
+    plan_data = st.session_state.current_plan
+    with st.expander("📋 View Detailed Plan", expanded=True):
+        for day in plan_data["days"]:
+            st.markdown(f"### Day {day['day']}")
+            for slot in day.get("slots", []):
+                st.markdown(f"**{slot['time_of_day'].capitalize()}**")
+                activities = slot.get("activities", [])
+                if activities:
+                    for act in activities:
+                        cost_str = ""
+                        if act.get("estimated_cost"):
+                            cost_str = f" — ₹{act['estimated_cost']:.0f}"
+                        act_type = act.get("type", "").capitalize()
+                        st.markdown(
+                            f"- **{act['name']}** `{act_type}`{cost_str}"
+                        )
+                else:
+                    st.markdown("- _Free time_")
+            st.divider()
+
+        # Budget summary
+        if plan_data.get("estimated_total_cost") is not None:
+            col1, col2 = st.columns(2)
+            with col1:
+                st.metric(
+                    "Estimated Total",
+                    f"₹{plan_data['estimated_total_cost']:.0f}",
+                )
+
+        # Assumptions
+        assumptions = plan_data.get("assumptions", [])
+        if assumptions:
+            st.caption("📝 " + " · ".join(assumptions))
+
+# Show validation info
+if st.session_state.validation:
+    val_data = st.session_state.validation
+    if not val_data.get("valid"):
+        for v in val_data.get("violations", []):
+            st.error(f"❌ {v}")
+    for w in val_data.get("warnings", []):
+        st.info(f"ℹ️ {w}")
+
 # Chat input
 if prompt := st.chat_input("What would you like to plan?"):
     # Display user message
@@ -593,48 +638,5 @@ if prompt := st.chat_input("What would you like to plan?"):
     validation_data = response.get("validation")
     if validation_data:
         st.session_state.validation = validation_data
-
-    # Show plan details if available
-    if plan_data and plan_data.get("days"):
-        with st.expander("📋 View Detailed Plan", expanded=False):
-            for day in plan_data["days"]:
-                st.markdown(f"### Day {day['day']}")
-                for slot in day.get("slots", []):
-                    st.markdown(f"**{slot['time_of_day'].capitalize()}**")
-                    activities = slot.get("activities", [])
-                    if activities:
-                        for act in activities:
-                            cost_str = ""
-                            if act.get("estimated_cost"):
-                                cost_str = f" — ₹{act['estimated_cost']:.0f}"
-                            act_type = act.get("type", "").capitalize()
-                            st.markdown(
-                                f"- **{act['name']}** `{act_type}`{cost_str}"
-                            )
-                    else:
-                        st.markdown("- _Free time_")
-                st.divider()
-
-            # Budget summary
-            if plan_data.get("estimated_total_cost") is not None:
-                col1, col2 = st.columns(2)
-                with col1:
-                    st.metric(
-                        "Estimated Total",
-                        f"₹{plan_data['estimated_total_cost']:.0f}",
-                    )
-
-            # Assumptions
-            assumptions = plan_data.get("assumptions", [])
-            if assumptions:
-                st.caption("📝 " + " · ".join(assumptions))
-
-    # Show validation info
-    if validation_data:
-        if not validation_data.get("valid"):
-            for v in validation_data.get("violations", []):
-                st.error(f"❌ {v}")
-        for w in validation_data.get("warnings", []):
-            st.info(f"ℹ️ {w}")
 
     st.rerun()
