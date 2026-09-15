@@ -1,0 +1,98 @@
+[
+    {
+        "id": "TEST_01",
+        "name": "Simple Hotel Search",
+        "message": "Find me a cheap hotel in Cambridge",
+        "expected_intent": "hotel_search",
+        "expected_tool": "hotel_search",
+        "checks": ["response contains hotel results", "no hallucinated hotels"]
+    },
+    {
+        "id": "TEST_02",
+        "name": "Restaurant Search with Preference",
+        "message": "Find vegetarian restaurants in the centre of Cambridge",
+        "expected_intent": "restaurant_search",
+        "expected_tool": "restaurant_search",
+        "checks": ["response contains restaurant results", "respects vegetarian preference"]
+    },
+    {
+        "id": "TEST_03",
+        "name": "Attraction Search",
+        "message": "What are some museums and parks to visit in Cambridge?",
+        "expected_intent": "attraction_search",
+        "expected_tool": "attraction_search",
+        "checks": ["response contains attraction results"]
+    },
+    {
+        "id": "TEST_04",
+        "name": "Multi-Domain Trip Planning",
+        "message": "I am travelling to Cambridge for two days. Create a plan covering places to visit, food options and a reasonable schedule.",
+        "expected_intent": "trip_planning",
+        "expected_tools": ["attraction_search", "restaurant_search"],
+        "checks": ["plan has 2 days", "plan includes attractions", "plan includes restaurants"]
+    },
+    {
+        "id": "TEST_05",
+        "name": "Budget-Constrained Trip",
+        "message": "Create a one-day trip plan for Cambridge based on a 2000 rupee budget.",
+        "expected_intent": "trip_planning",
+        "checks": ["plan has 1 day", "estimated cost <= 2000"]
+    },
+    {
+        "id": "TEST_06",
+        "name": "Replanning After Budget Change",
+        "prerequisite": "TEST_05",
+        "message": "Reduce the budget to 1500.",
+        "expected_intent": "replanning",
+        "checks": ["state retains location", "budget updated to 1500", "plan revised"]
+    },
+    {
+        "id": "TEST_07",
+        "name": "Preference Memory",
+        "prerequisite": "TEST_04",
+        "message": "Also make sure all restaurants are vegetarian.",
+        "checks": ["vegetarian preference retained", "restaurants filtered"]
+    },
+    {
+        "id": "TEST_08",
+        "name": "Impossible Constraints",
+        "message": "I have 2 days, 500 rupees, and want to visit 10 attractions in Cambridge.",
+        "expected_intent": "trip_planning",
+        "checks": ["system identifies constraint conflict", "does not produce invalid plan"]
+    },
+    {
+        "id": "TEST_09",
+        "name": "Changed Preference",
+        "prerequisite": "TEST_04",
+        "message": "Actually, I prefer Italian food instead.",
+        "checks": ["preference updated", "restaurants reflect change"]
+    },
+    {
+        "id": "TEST_10",
+        "name": "Study Planning",
+        "message": "Plan my study schedule for the next seven days. I need to cover math, physics, and chemistry.",
+        "expected_intent": "study_planning",
+        "checks": ["plan has 7 days", "no tool calls needed", "subjects distributed"]
+    },
+    {
+        "id": "TEST_11",
+        "name": "Missing Information Clarification",
+        "message": "Plan a trip for me.",
+        "expected_intent": "trip_planning",
+        "checks": ["system asks for location", "system asks for duration"]
+    },
+    {
+        "id": "TEST_12",
+        "name": "Tool Failure Handling",
+        "message": "Find hotels in a nonexistent city called Xyzville",
+        "checks": ["system handles gracefully", "no crash", "informative message"]
+    },
+    {
+        "id": "TEST_13",
+        "name": "Transport Search",
+        "message": "Find trains from Cambridge to London",
+        "expected_intent": "transport_search",
+        "expected_tool": "transport_search",
+        "checks": ["response contains transport results"]
+    }
+]

@@ -1,0 +1,1517 @@
+PLANWISE AI
+PRODUCT REQUIREMENTS DOCUMENT (PRD)
+
+Document Version: 1.0
+Project: PlanWise AI — Agentic Personal Task and Trip Planning Assistant
+Project Type: GenAI / Agentic AI
+Target: Undergraduate GEN AI ABL-1 Project
+Submission Deadline: 30 October 2026
+
+============================================================
+1. PRODUCT OVERVIEW
+============================================================
+
+PlanWise AI is an agentic planning assistant that converts a user's natural-language goal into an executable, constraint-aware multi-step plan.
+
+The system is designed to demonstrate the core concepts of agentic GenAI:
+
+- Intent understanding
+- Task decomposition
+- Information retrieval
+- Tool calling
+- State management
+- Constraint handling
+- Verification
+- Final response generation
+- Replanning when requirements change
+- Basic memory
+- Agent evaluation
+
+The system will support two primary use cases:
+
+1. Trip planning
+   Example:
+   "I am travelling to Bengaluru for two days. Create a plan covering places to visit, food options and a reasonable schedule."
+
+2. Personal/study planning
+   Example:
+   "Plan my study schedule for the next seven days."
+
+A budget-constrained trip is another supported example:
+"Create a one-day trip plan based on a ₹2,000 budget."
+
+The project will use freely available MultiWOZ 2.2 data as the local knowledge source for relevant travel domains instead of paid travel APIs.
+
+The implementation should remain intentionally focused on the requirements of this project. No unnecessary features, external services, or complex infrastructure should be introduced.
+
+============================================================
+2. PRODUCT GOAL
+============================================================
+
+Build a working AI agent that can:
+
+1. Understand what the user wants.
+2. Extract relevant constraints and preferences.
+3. Break the goal into meaningful subtasks.
+4. Select and invoke appropriate tools.
+5. Maintain the user's current planning state.
+6. Retrieve relevant information from the local dataset.
+7. Generate a feasible schedule.
+8. Check the generated plan against user constraints.
+9. Reject or revise infeasible plans.
+10. Re-plan when the user changes an important requirement.
+11. Remember relevant preferences during the conversation.
+12. Produce a coherent final plan through a simple Streamlit interface.
+
+The primary success criterion is not conversational ability alone.
+
+The system must demonstrate an actual agentic workflow in which the model reasons over a goal, uses tools, maintains state, validates constraints, and can revise an existing plan.
+
+============================================================
+3. PROJECT SCOPE
+============================================================
+
+IN SCOPE
+
+- Natural-language user requests
+- Trip planning
+- Study/personal schedule planning
+- Intent classification
+- Parameter/slot extraction
+- Multi-step task decomposition
+- Local information retrieval
+- Hotel search
+- Restaurant search
+- Attraction search
+- Transport search
+- Structured tool invocation
+- State management
+- Budget handling
+- Time/date handling
+- Preference handling
+- Constraint validation
+- Schedule generation
+- Plan verification
+- Replanning
+- Conversation-level memory
+- Agent evaluation
+- Streamlit UI
+- Local execution
+- Optional cloud deployment
+
+OUT OF SCOPE
+
+- Paid third-party travel APIs
+- Real booking or purchasing
+- Payment processing
+- Autonomous financial transactions
+- Real-world reservation confirmation
+- Production-grade enterprise authentication
+- Complex mobile applications
+- Training a large language model from scratch
+- Multiple expensive LLMs
+- Unnecessary microservices
+- Complex distributed infrastructure
+
+The project should remain focused on demonstrating agentic planning.
+
+============================================================
+4. TARGET USERS
+============================================================
+
+Primary user:
+
+A student or general user who wants an AI assistant to create and revise a personal plan.
+
+Example user needs:
+
+- Plan a short trip.
+- Find suitable attractions.
+- Find food options.
+- Organize transportation.
+- Create a study schedule.
+- Work within a fixed budget.
+- Change constraints after receiving an initial plan.
+- Determine whether a requested plan is feasible.
+
+============================================================
+5. PRIMARY USER JOURNEYS
+============================================================
+
+5.1 TRIP PLANNING
+
+User:
+"I am travelling to Bengaluru for two days. Create a plan covering places to visit, food options and a reasonable schedule."
+
+Expected workflow:
+
+User Goal
+    ↓
+Intent Understanding
+    ↓
+Extract:
+- destination
+- duration
+- interests
+- food preferences
+- budget if provided
+    ↓
+Task Decomposition
+    ↓
+Create subtasks:
+- search attractions
+- search restaurants
+- search transport
+- optionally search hotel
+- create schedule
+- check constraints
+    ↓
+Tool Invocation
+    ↓
+Retrieve local information
+    ↓
+State Update
+    ↓
+Schedule Generation
+    ↓
+Constraint Validation
+    ↓
+Verification
+    ↓
+Final Plan
+
+5.2 STUDY PLANNING
+
+User:
+"Plan my study schedule for the next seven days."
+
+Expected workflow:
+
+User Goal
+    ↓
+Intent Understanding
+    ↓
+Extract:
+- duration
+- subjects/topics
+- available time
+- preferences
+    ↓
+Task Decomposition
+    ↓
+Schedule Generation
+    ↓
+Constraint Validation
+    ↓
+Final Plan
+
+5.3 BUDGET-CONSTRAINED TRIP
+
+User:
+"Create a one-day trip plan based on a ₹2,000 budget."
+
+The system should:
+
+- understand the budget
+- retrieve relevant options
+- estimate the plan cost using available data
+- generate a plan within the budget
+- reject or revise a plan if the budget is exceeded
+
+5.4 REPLANNING
+
+Initial request:
+"Plan a two-day trip with a ₹2,000 budget."
+
+Follow-up:
+"Reduce the budget to ₹1,500."
+
+The system must:
+
+- retain the existing planning state
+- update the budget
+- identify the changed constraint
+- regenerate/revise the plan
+- validate the revised plan
+- present the updated plan
+
+It must not behave as if the second request were an unrelated new conversation.
+
+5.5 IMPOSSIBLE CONSTRAINTS
+
+User:
+"I have 2 days, ₹500, and want to visit 10 attractions."
+
+The system should recognize that the constraints are unrealistic or infeasible and clearly explain the conflict rather than confidently producing an invalid schedule.
+
+============================================================
+6. FUNCTIONAL REQUIREMENTS
+============================================================
+
+FR-01: USER INPUT
+
+The system shall accept natural-language planning requests through the Streamlit UI.
+
+FR-02: INTENT UNDERSTANDING
+
+The system shall identify the user's primary planning intent.
+
+Example:
+
+Input:
+"Find a reasonably priced hotel."
+
+Output:
+
+{
+  "intent": "hotel_search",
+  "budget": "reasonable"
+}
+
+The system should support relevant intents such as:
+
+- hotel_search
+- restaurant_search
+- attraction_search
+- transport_search
+- trip_planning
+- study_planning
+- schedule_generation
+- replanning
+
+FR-03: INFORMATION EXTRACTION
+
+The system shall extract relevant planning parameters, including where applicable:
+
+- Location
+- Dates
+- Duration
+- Budget
+- Preferences
+- Interests
+- Food preferences
+- Travel preferences
+- Available time
+- Existing selected options
+
+FR-04: TASK DECOMPOSITION
+
+The planning agent shall convert a high-level request into appropriate subtasks.
+
+Example:
+
+"Plan a two-day trip."
+
+Possible subtasks:
+
+1. Search accommodation.
+2. Search attractions.
+3. Search restaurants.
+4. Search transport.
+5. Build schedule.
+6. Check budget.
+7. Verify final plan.
+
+The decomposition must depend on the user's request. The system should not invoke irrelevant tools unnecessarily.
+
+FR-05: TOOL CALLING
+
+The agent shall invoke tools using structured parameters.
+
+Required tools:
+
+- search_hotel()
+- search_restaurant()
+- search_attraction()
+- search_transport()
+
+Tools shall operate on local/static information derived from MultiWOZ 2.2.
+
+FR-06: TOOL PARAMETER VALIDATION
+
+Tool arguments shall be validated before execution.
+
+Pydantic should be used for structured input validation where appropriate.
+
+Invalid parameters must not silently execute.
+
+FR-07: INFORMATION RETRIEVAL
+
+The system shall retrieve relevant records from the prepared local domain knowledge.
+
+FAISS shall be used as the recommended vector-search mechanism where semantic retrieval is appropriate.
+
+FR-08: STATE MANAGEMENT
+
+The system shall maintain the current planning state.
+
+Minimum state:
+
+- Location
+- Dates/duration
+- Budget
+- Preferences
+- Interests
+- Chosen options
+- Current plan
+- Relevant user constraints
+
+State must persist across turns within the active conversation.
+
+FR-09: CONSTRAINT HANDLING
+
+The system shall validate generated plans against known constraints.
+
+Important constraints include:
+
+- Budget
+- Duration
+- Time availability
+- User preferences
+- Number of days
+- Schedule feasibility
+
+The system shall identify constraint violations rather than blindly returning an invalid plan.
+
+FR-10: SCHEDULE GENERATION
+
+The system shall generate a coherent time-based plan.
+
+Trip example:
+
+Day 1 Morning
+Day 1 Afternoon
+Day 1 Evening
+Day 2 Morning
+Day 2 Afternoon
+Day 2 Evening
+
+The schedule should use retrieved options and user constraints.
+
+FR-11: PLAN VERIFICATION
+
+Before presenting the final plan, the system shall verify that the plan satisfies known constraints and does not contain obvious contradictions.
+
+FR-12: REPLANNING
+
+When a user changes a relevant requirement, the system shall update the current state and generate a revised plan.
+
+Example:
+
+Budget:
+₹2,000 → ₹1,500
+
+The agent should revise the existing plan instead of treating the request as a completely unrelated task.
+
+FR-13: MEMORY
+
+The system shall retain relevant preferences during the active planning conversation.
+
+Examples:
+
+- Vegetarian
+- Preferred travel time
+- Budget
+- Interests
+
+Memory should be used when generating subsequent plans.
+
+FR-14: FINAL RESPONSE
+
+The system shall present a clear final plan including:
+
+- Selected activities/options
+- Schedule
+- Relevant cost information where available
+- Important constraints
+- Any limitations or infeasibility warnings
+
+============================================================
+7. AGENT DESIGN
+============================================================
+
+The system should use a single small LLM sequentially for different agent roles.
+
+Recommended LLM:
+
+Qwen2.5-3B-Instruct
+
+Recommended local runtime:
+
+Ollama
+
+The project does not require multiple expensive LLMs.
+
+Logical agent responsibilities:
+
+1. Intent Understanding
+2. Task Planning
+3. Tool Selection
+4. State Update
+5. Constraint/Verification Reasoning
+6. Final Response Generation
+
+These responsibilities may be implemented using a single model with structured prompts and a controlled Python workflow.
+
+============================================================
+8. AGENT EXECUTION FLOW
+============================================================
+
+Recommended high-level flow:
+
+USER REQUEST
+    ↓
+Parse / Understand Intent
+    ↓
+Extract Parameters
+    ↓
+Load Current State
+    ↓
+Create Task Plan
+    ↓
+Select Required Tools
+    ↓
+Execute Tools
+    ↓
+Update State
+    ↓
+Generate Candidate Plan
+    ↓
+Run Constraint Validation
+    ↓
+    ┌───────────────┐
+    │ Valid Plan?   │
+    └───────┬───────┘
+            │
+       YES  │  NO
+        ↓   │   ↓
+   Verify   │ Replan
+        ↓   │   │
+   Final    │   └──────→ Generate Candidate Plan
+   Response │
+            │
+            └──────────────
+
+For a changed user requirement:
+
+NEW USER INPUT
+    ↓
+Update Existing State
+    ↓
+Identify Changed Constraint
+    ↓
+Re-plan
+    ↓
+Validate
+    ↓
+Return Revised Plan
+
+============================================================
+9. DATA REQUIREMENTS
+============================================================
+
+Primary dataset:
+
+MultiWOZ 2.2
+
+Relevant domains:
+
+- Hotel
+- Restaurant
+- Attraction
+- Train
+- Taxi
+
+Dataset source:
+
+Hugging Face:
+https://huggingface.co/datasets/pfb30/multi_woz_v22
+
+Original repository:
+https://github.com/budzianowski/multiwoz
+
+The dataset provides useful information including:
+
+- Intents
+- Dialogue state
+- Slots
+- Domains
+- User/system turns
+
+Data preparation process:
+
+1. Obtain MultiWOZ 2.2.
+2. Select relevant domains.
+3. Extract useful records.
+4. Normalize the records.
+5. Convert records into searchable documents/records.
+6. Generate embeddings where required.
+7. Store vectors in FAISS.
+8. Keep structured fields available for filtering and tool execution.
+
+The dataset is used to simulate travel-domain information without paid APIs.
+
+============================================================
+10. DATA / TOOL LAYER
+============================================================
+
+10.1 HOTEL TOOL
+
+Function:
+
+search_hotel()
+
+Inputs may include:
+
+- location
+- price/budget
+- preferences
+
+Output:
+
+Structured hotel candidates.
+
+10.2 RESTAURANT TOOL
+
+Function:
+
+search_restaurant()
+
+Inputs may include:
+
+- location
+- cuisine
+- dietary preference
+- price/budget
+
+Output:
+
+Structured restaurant candidates.
+
+10.3 ATTRACTION TOOL
+
+Function:
+
+search_attraction()
+
+Inputs may include:
+
+- location
+- interest/category
+- time constraints
+
+Output:
+
+Structured attraction candidates.
+
+10.4 TRANSPORT TOOL
+
+Function:
+
+search_transport()
+
+Inputs may include:
+
+- origin
+- destination
+- preferred mode
+- time
+
+Output:
+
+Structured transport candidates.
+
+All tools must return predictable structured results so that the planning agent can reason over them.
+
+============================================================
+11. CONSTRAINT ENGINE
+============================================================
+
+Constraint validation should be implemented explicitly rather than relying only on free-form LLM output.
+
+Minimum checks:
+
+1. Budget constraint
+2. Duration constraint
+3. Time feasibility
+4. Required preferences
+5. Selected-option consistency
+
+Example:
+
+Input:
+
+Budget = ₹2,000
+
+Generated plan:
+
+Estimated cost = ₹2,450
+
+Result:
+
+INVALID
+
+The agent should receive the validation result and revise the plan.
+
+For impossible constraints:
+
+Input:
+
+- 2 days
+- ₹500
+- 10 attractions
+
+Expected behavior:
+
+- identify infeasibility
+- explain the main conflict
+- avoid claiming that the plan satisfies all requirements
+- request or suggest a relaxation only when appropriate
+
+============================================================
+12. REPLANNING MODEL
+============================================================
+
+Replanning is a core requirement.
+
+The system should treat the plan as stateful.
+
+Example state:
+
+{
+  "location": "Bengaluru",
+  "duration_days": 2,
+  "budget": 2000,
+  "preferences": ["vegetarian"],
+  "interests": ["culture", "food"],
+  "selected_options": [...],
+  "current_plan": [...]
+}
+
+User changes:
+
+"Reduce budget to ₹1500."
+
+System:
+
+1. Parse the new requirement.
+2. Update budget.
+3. Preserve unchanged state.
+4. Identify affected decisions.
+5. Recalculate/retrieve alternatives where necessary.
+6. Generate revised schedule.
+7. Validate constraints.
+8. Return updated plan.
+
+The state should not be unnecessarily discarded between related turns.
+
+============================================================
+13. MEMORY REQUIREMENTS
+============================================================
+
+Memory is limited to relevant planning information.
+
+Examples:
+
+- Vegetarian
+- Budget
+- Preferred travel time
+- Interests
+- Location
+- Dates
+
+Memory should improve subsequent requests within the conversation.
+
+Example:
+
+User:
+"I am vegetarian."
+
+Later:
+"Find me a restaurant for tomorrow."
+
+The system should retain the vegetarian preference.
+
+============================================================
+14. UI REQUIREMENTS
+============================================================
+
+Framework:
+
+Streamlit
+
+The UI should remain simple and usable.
+
+Required components:
+
+1. Application title.
+2. Natural-language input box.
+3. Submit/generate action.
+4. Conversation/plan display.
+5. Final generated schedule.
+6. Relevant constraint information.
+7. Replanning through follow-up messages.
+
+The UI does not require a complex frontend.
+
+Example:
+
+--------------------------------------------------
+PLANWISE AI
+Agentic Personal Task and Trip Planning Assistant
+--------------------------------------------------
+
+What would you like to plan?
+
+[____________________________________________]
+
+[ Generate Plan ]
+
+--------------------------------------------------
+Current Plan
+--------------------------------------------------
+
+Day 1
+Morning: ...
+Afternoon: ...
+Evening: ...
+
+Day 2
+Morning: ...
+Afternoon: ...
+Evening: ...
+
+Budget:
+₹1,850 / ₹2,000
+
+Status:
+✓ Constraints satisfied
+
+--------------------------------------------------
+
+============================================================
+15. TECHNOLOGY STACK
+============================================================
+
+Required/recommended technologies from the project specification:
+
+Language:
+Python
+
+LLM:
+Qwen2.5-3B-Instruct
+
+Local LLM runtime:
+Ollama
+
+Agent framework:
+LangGraph
+
+Alternative implementation:
+Plain Python state machine
+
+Alternative frameworks:
+LangChain
+
+Structured validation:
+Pydantic
+
+Vector search:
+FAISS
+
+UI:
+Streamlit
+
+Dataset:
+MultiWOZ 2.2
+
+The simplest implementation should be preferred.
+
+A plain Python state-machine implementation is acceptable and may be used initially before introducing LangGraph.
+
+============================================================
+16. IMPLEMENTATION PHASES
+============================================================
+
+PHASE 1 — ENVIRONMENT
+
+Set up:
+
+- Python environment
+- Ollama
+- Qwen2.5-3B-Instruct
+- Required Python libraries
+- Streamlit
+
+Deliverable:
+
+A local application capable of sending a user request to the model and receiving a structured response.
+
+PHASE 2 — DATA PREPARATION
+
+- Download MultiWOZ 2.2.
+- Select relevant domains.
+- Prepare searchable records.
+- Build FAISS index if required.
+
+Deliverable:
+
+Local searchable travel knowledge.
+
+PHASE 3 — TOOLS
+
+Implement:
+
+- search_hotel()
+- search_restaurant()
+- search_attraction()
+- search_transport()
+
+Deliverable:
+
+Validated Python tools returning structured results.
+
+PHASE 4 — INTENT AND PARAMETER EXTRACTION
+
+Implement structured intent/slot extraction.
+
+Deliverable:
+
+Natural-language request → structured planning information.
+
+PHASE 5 — PLANNER
+
+Implement:
+
+- goal understanding
+- task decomposition
+- tool selection
+- tool invocation
+
+Deliverable:
+
+The system autonomously chooses and executes relevant tools.
+
+PHASE 6 — STATE
+
+Add state management for:
+
+- location
+- dates
+- budget
+- preferences
+- interests
+- chosen options
+- current plan
+
+Deliverable:
+
+Multi-turn stateful planning.
+
+PHASE 7 — CONSTRAINT VALIDATION
+
+Implement explicit checks for:
+
+- budget
+- duration
+- time
+- preferences
+- feasibility
+
+Deliverable:
+
+Invalid plans are detected.
+
+PHASE 8 — SCHEDULE GENERATION
+
+Generate structured daily schedules from validated information.
+
+Deliverable:
+
+Coherent final plan.
+
+PHASE 9 — REPLANNING
+
+Support changed requirements.
+
+Deliverable:
+
+The agent updates existing state and produces a revised plan.
+
+PHASE 10 — MEMORY
+
+Store relevant preferences during the active conversation.
+
+Deliverable:
+
+Subsequent requests use retained preferences.
+
+PHASE 11 — EVALUATION
+
+Create test cases covering:
+
+- normal requests
+- multi-domain requests
+- conflicting constraints
+- changed budgets
+- changed preferences
+- unrealistic plans
+- tool-selection failures
+
+Deliverable:
+
+Evaluation results for all required criteria.
+
+PHASE 12 — UI AND DEPLOYMENT
+
+Polish Streamlit interface.
+
+Run full end-to-end tests.
+
+Optional:
+
+Deploy to AWS Lambda/API Gateway or Google Cloud Run.
+
+============================================================
+17. ERROR HANDLING
+============================================================
+
+The system should fail safely and clearly.
+
+Examples:
+
+Missing location:
+"I need a destination to create the trip plan."
+
+Missing duration:
+"How many days should the trip cover?"
+
+Impossible constraints:
+"The requested activities cannot fit within the stated budget/time."
+
+No matching dataset results:
+"No suitable records were found in the available travel data."
+
+Invalid tool parameters:
+Reject the call and request correction/retry.
+
+LLM malformed output:
+Validate structured output and retry or return a controlled error.
+
+The system should never silently fabricate retrieved dataset information.
+
+============================================================
+18. EVALUATION PLAN
+============================================================
+
+The evaluation must cover the criteria specified for the project.
+
+18.1 INTENT RECOGNITION
+
+Measure whether the correct intent/domain is identified.
+
+Example:
+
+"Find a reasonably priced hotel."
+
+Expected:
+hotel_search
+
+18.2 TASK DECOMPOSITION
+
+Measure whether required subtasks are identified.
+
+Example:
+
+Trip planning should appropriately identify attraction, restaurant, transport and schedule subtasks when relevant.
+
+18.3 TOOL SELECTION
+
+Measure whether the correct tool is invoked.
+
+Example:
+
+Restaurant request → search_restaurant()
+
+18.4 PARAMETER EXTRACTION
+
+Measure correctness of:
+
+- Location
+- Budget
+- Duration
+- Preferences
+- Dates
+
+18.5 STATE MANAGEMENT
+
+Test multi-turn conversations.
+
+Example:
+
+Turn 1:
+"Plan a Bengaluru trip."
+
+Turn 2:
+"I am vegetarian."
+
+Turn 3:
+"Reduce the budget."
+
+Verify that prior information remains available.
+
+18.6 CONSTRAINT SATISFACTION
+
+Measure whether generated plans satisfy explicit constraints.
+
+18.7 REPLANNING
+
+Test changed constraints and verify that the system updates the plan rather than restarting from scratch.
+
+18.8 FINAL-PLAN QUALITY
+
+Evaluate:
+
+- coherence
+- completeness
+- schedule structure
+- relevance
+- constraint compliance
+
+18.9 AGENT RELIABILITY
+
+Test repeated requests and tool failures.
+
+18.10 HALLUCINATION CONTROL
+
+Verify that the agent does not claim unsupported information as retrieved fact.
+
+18.11 RESPONSE LATENCY
+
+Measure end-to-end response time.
+
+18.12 UI USABILITY
+
+Evaluate whether users can:
+
+- submit requests
+- understand generated plans
+- see constraints
+- continue the conversation
+- re-plan
+
+============================================================
+19. TEST CASES
+============================================================
+
+TEST 01 — SIMPLE HOTEL
+
+Input:
+"Find a reasonably priced hotel."
+
+Expected:
+hotel intent identified and hotel search tool invoked.
+
+TEST 02 — RESTAURANT
+
+Input:
+"Find a vegetarian restaurant."
+
+Expected:
+restaurant intent + vegetarian preference.
+
+TEST 03 — ATTRACTION
+
+Input:
+"Find attractions suitable for a two-day trip."
+
+Expected:
+attraction search + duration state.
+
+TEST 04 — MULTI-DOMAIN TRIP
+
+Input:
+"Plan a two-day trip including attractions and food."
+
+Expected:
+multiple appropriate tools + schedule.
+
+TEST 05 — BUDGET
+
+Input:
+"Plan a one-day trip with a ₹2,000 budget."
+
+Expected:
+budget retained and final plan satisfies budget.
+
+TEST 06 — REPLANNING
+
+Turn 1:
+"Plan a two-day trip with ₹2,000."
+
+Turn 2:
+"Reduce the budget to ₹1,500."
+
+Expected:
+existing state retained and plan revised.
+
+TEST 07 — PREFERENCE MEMORY
+
+Turn 1:
+"I am vegetarian."
+
+Turn 2:
+"Plan my food options."
+
+Expected:
+vegetarian preference applied.
+
+TEST 08 — IMPOSSIBLE CONSTRAINTS
+
+Input:
+"I have 2 days, ₹500 and want to visit 10 attractions."
+
+Expected:
+system identifies infeasibility.
+
+TEST 09 — CHANGED PREFERENCE
+
+Turn 1:
+"Plan my trip with cultural attractions."
+
+Turn 2:
+"Actually, prioritize food instead."
+
+Expected:
+plan revised using new preference.
+
+TEST 10 — TOOL PARAMETER FAILURE
+
+Provide invalid/missing tool parameters.
+
+Expected:
+validation prevents invalid execution.
+
+============================================================
+20. ACCEPTANCE CRITERIA
+============================================================
+
+The project is considered complete when all of the following work:
+
+[ ] User can submit natural-language goals.
+
+[ ] System identifies the relevant intent.
+
+[ ] System extracts important constraints/parameters.
+
+[ ] System decomposes suitable requests into subtasks.
+
+[ ] System invokes the appropriate tools.
+
+[ ] Hotel search works.
+
+[ ] Restaurant search works.
+
+[ ] Attraction search works.
+
+[ ] Transport search works.
+
+[ ] MultiWOZ-derived local information can be retrieved.
+
+[ ] System maintains planning state.
+
+[ ] Budget constraints are validated.
+
+[ ] Time/duration constraints are considered.
+
+[ ] Preferences are maintained.
+
+[ ] A coherent schedule is generated.
+
+[ ] Generated plans are verified.
+
+[ ] Invalid plans are rejected or revised.
+
+[ ] User can change requirements.
+
+[ ] Agent replans without losing relevant previous state.
+
+[ ] Relevant preferences are remembered.
+
+[ ] Impossible constraints are detected.
+
+[ ] Final responses are understandable.
+
+[ ] Streamlit UI works end-to-end.
+
+[ ] Evaluation test cases are executed.
+
+[ ] Local application runs reliably.
+
+[ ] Optional cloud deployment works if implemented.
+
+============================================================
+21. NON-FUNCTIONAL REQUIREMENTS
+============================================================
+
+NFR-01: SIMPLICITY
+
+The architecture should remain understandable to an undergraduate developer.
+
+NFR-02: RELIABILITY
+
+Tool execution and state updates should be deterministic where possible.
+
+NFR-03: STRUCTURED OUTPUT
+
+LLM outputs used by application logic should use structured schemas.
+
+NFR-04: VALIDATION
+
+Critical constraints should be checked programmatically.
+
+NFR-05: LOCAL-FIRST
+
+The complete project should work locally without paid external APIs.
+
+NFR-06: PERFORMANCE
+
+The application should provide reasonable response latency for a local small model.
+
+NFR-07: MAINTAINABILITY
+
+Agent logic, tools, state, validation and UI should be separated into clear modules.
+
+NFR-08: TRACEABILITY
+
+The system should make it possible during development to inspect:
+
+- detected intent
+- extracted parameters
+- selected tools
+- tool outputs
+- state
+- validation result
+- replanning decision
+
+This is primarily for debugging and evaluation.
+
+============================================================
+22. RECOMMENDED PROJECT STRUCTURE
+============================================================
+
+planwise-ai/
+│
+├── app.py
+│
+├── agent/
+│   ├── planner.py
+│   ├── prompts.py
+│   ├── state.py
+│   └── schemas.py
+│
+├── tools/
+│   ├── hotel.py
+│   ├── restaurant.py
+│   ├── attraction.py
+│   └── transport.py
+│
+├── data/
+│   ├── raw/
+│   └── processed/
+│
+├── retrieval/
+│   ├── index.py
+│   └── search.py
+│
+├── validation/
+│   └── constraints.py
+│
+├── evaluation/
+│   ├── test_cases.json
+│   └── evaluate.py
+│
+├── requirements.txt
+├── README.md
+└── .env.example
+
+The exact structure may be simplified if a smaller structure is sufficient.
+
+============================================================
+23. CORE DESIGN PRINCIPLES
+============================================================
+
+1. LLM for language and planning.
+2. Python for deterministic application logic.
+3. Tools for information retrieval.
+4. State for continuity.
+5. Programmatic validation for constraints.
+6. Replanning for changing requirements.
+7. Structured outputs for reliability.
+8. Local/static data to avoid paid APIs.
+9. Simple UI.
+10. No unnecessary features.
+
+The LLM should not be trusted to enforce hard constraints purely through natural-language reasoning.
+
+============================================================
+24. EXPECTED END-TO-END EXAMPLE
+============================================================
+
+USER:
+
+"I am travelling to Bengaluru for two days. I have ₹2,000. I like cultural attractions and vegetarian food. Create a reasonable plan."
+
+SYSTEM INTERNAL FLOW:
+
+1. Identify trip-planning intent.
+2. Extract:
+   Location = Bengaluru
+   Duration = 2 days
+   Budget = ₹2,000
+   Interest = cultural attractions
+   Food preference = vegetarian
+3. Create subtasks.
+4. Search attractions.
+5. Search restaurants.
+6. Search transport if required.
+7. Select relevant options.
+8. Build schedule.
+9. Calculate/check constraints.
+10. Verify plan.
+11. Return final schedule.
+
+FINAL RESPONSE:
+
+Day 1
+Morning:
+...
+
+Afternoon:
+...
+
+Evening:
+...
+
+Day 2
+Morning:
+...
+
+Afternoon:
+...
+
+Evening:
+...
+
+Estimated budget:
+₹X / ₹2,000
+
+Constraint status:
+Satisfied.
+
+USER:
+
+"Reduce the budget to ₹1,500."
+
+SYSTEM:
+
+1. Update existing budget.
+2. Preserve destination, duration and preferences.
+3. Re-plan.
+4. Validate.
+5. Return revised schedule.
+
+If the new budget is impossible:
+
+"With the current requirements, the plan exceeds ₹1,500. I reduced/removed lower-priority activities and produced the closest feasible plan."
+
+============================================================
+25. DELIVERY PRIORITY
+============================================================
+
+Priority 1 — MUST WORK
+
+- User input
+- Intent understanding
+- Task decomposition
+- Tools
+- State
+- Constraint checking
+- Schedule generation
+- Replanning
+- Final response
+- Streamlit UI
+
+Priority 2 — REQUIRED FOR EVALUATION
+
+- Test cases
+- Intent accuracy
+- Tool selection
+- Parameter extraction
+- State tests
+- Constraint tests
+- Replanning tests
+- Hallucination checks
+- Latency measurement
+
+Priority 3 — DEPLOYMENT
+
+- Local complete execution
+- Optional cloud deployment
+
+No feature outside the stated scope should delay completion of the core system.
+
+============================================================
+26. DEFINITION OF DONE
+============================================================
+
+PlanWise AI is DONE when a user can open the Streamlit application, enter a natural-language planning goal, and observe the complete agentic flow:
+
+Understand
+→ Decompose
+→ Retrieve
+→ Use tools
+→ Maintain state
+→ Check constraints
+→ Generate schedule
+→ Verify
+→ Respond
+
+and then change a requirement in a follow-up message and receive a correctly revised plan without losing relevant state.
+
+The project must also demonstrate through test cases that the agent can recognize intents, select tools, extract parameters, satisfy constraints, re-plan, control hallucinations, and produce usable final plans.
+
+============================================================
+27. REFERENCE PROJECT REQUIREMENT
+============================================================
+
+This PRD is based strictly on the supplied Project 18 specification:
+
+"PlanWise AI — Agentic Personal Task and Trip Planning Assistant."
+
+The supplied specification defines:
+
+- agentic personal task and trip planning
+- MultiWOZ 2.2 as the freely available dataset
+- Qwen2.5-3B-Instruct
+- LangGraph / plain Python state machine
+- Python, Pydantic, FAISS, Streamlit and Ollama
+- hotel, restaurant, attraction and transport tools
+- intent classification
+- task decomposition
+- tool invocation
+- state management
+- constraint validation
+- schedule generation
+- replanning
+- memory
+- agent evaluation
+- local and optional cloud deployment
+- evaluation criteria including intent recognition, decomposition, tool selection, parameter extraction, state management, constraint satisfaction, replanning, final-plan quality, reliability, hallucination control, latency and UI usability
+
+Submission deadline:
+30 October 2026.
+
+============================================================
+END OF PRD
+============================================================

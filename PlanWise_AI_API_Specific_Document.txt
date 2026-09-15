@@ -1,0 +1,1308 @@
+PLANWISE AI — API-SPECIFIC DOCUMENT
+Frontend ↔ Backend API Contracts
+
+Version: 1.0
+Project: PlanWise AI — Agentic Personal Task and Trip Planning Assistant
+
+======================================================================
+1. PURPOSE
+======================================================================
+
+This document defines the complete API contract between the PlanWise
+frontend and backend.
+
+IMPORTANT ARCHITECTURAL NOTE
+
+The selected project stack uses Streamlit as the frontend and Python as
+the backend/application layer. Therefore, the core implementation does
+NOT require a separate public REST API server.
+
+The APIs defined in this document are the logical backend service
+contracts that the frontend uses.
+
+Implementation options:
+
+PRIMARY:
+    Streamlit
+        ↓
+    Python Application Controller
+        ↓
+    Agent / Services / Tools
+
+OPTIONAL:
+    Streamlit
+        ↓
+    REST API layer
+        ↓
+    Python Backend
+
+If a REST API is required later, these contracts can be exposed through
+FastAPI without changing the underlying business logic.
+
+No paid external travel APIs are required.
+
+======================================================================
+2. API ARCHITECTURE
+======================================================================
+
+                    FRONTEND
+                  Streamlit UI
+                       |
+                       |
+              Application API Layer
+                       |
+          +------------+-------------+
+          |            |             |
+          ▼            ▼             ▼
+       Agent API    Session API   Health API
+          |
+          ▼
+    Planning Agent
+          |
+    +-----+------+----------------+
+    |            |                |
+    ▼            ▼                ▼
+   LLM         Tools         Validation
+    |            |                |
+    ▼            ▼                ▼
+ Ollama      Retrieval       Constraint Engine
+    |            |
+ Qwen2.5-3B   FAISS
+                 |
+            MultiWOZ 2.2
+
+======================================================================
+3. API DESIGN PRINCIPLES
+======================================================================
+
+1. Frontend never directly calls Ollama.
+2. Frontend never directly calls FAISS.
+3. Frontend never directly accesses raw dataset files.
+4. Frontend never executes tools directly.
+5. Backend owns all business logic.
+6. LLM output is treated as untrusted input.
+7. Tool parameters are validated before execution.
+8. Constraints are checked programmatically.
+9. Backend returns structured responses.
+10. Frontend is responsible only for presentation and interaction.
+11. No paid third-party travel API is required.
+12. API contracts should remain stable even if internal implementation
+    changes.
+
+======================================================================
+4. API BASE STRUCTURE
+======================================================================
+
+If REST endpoints are exposed:
+
+Base URL:
+
+    /api/v1
+
+Endpoint groups:
+
+    /health
+    /sessions
+    /plans
+    /messages
+    /tools
+    /validation
+
+Core user-facing APIs:
+
+    POST   /api/v1/sessions
+    GET    /api/v1/sessions/{session_id}
+    POST   /api/v1/sessions/{session_id}/messages
+    GET    /api/v1/sessions/{session_id}/plan
+    POST   /api/v1/sessions/{session_id}/replan
+
+Internal service APIs:
+
+    POST   /api/v1/tools/hotels/search
+    POST   /api/v1/tools/restaurants/search
+    POST   /api/v1/tools/attractions/search
+    POST   /api/v1/tools/transport/search
+
+Validation:
+
+    POST   /api/v1/validation/plan
+
+System:
+
+    GET    /api/v1/health
+
+======================================================================
+5. FRONTEND → BACKEND ENDPOINT MAP
+======================================================================
+
+FRONTEND ACTION                  BACKEND API
+
+Open application                 GET /api/v1/health
+
+Start planning session           POST /api/v1/sessions
+
+Send initial goal                POST /api/v1/sessions/{id}/messages
+
+Send follow-up                   POST /api/v1/sessions/{id}/messages
+
+Change budget                    POST /api/v1/sessions/{id}/replan
+
+Change preference               POST /api/v1/sessions/{id}/replan
+
+Change duration                 POST /api/v1/sessions/{id}/replan
+
+Request current plan            GET /api/v1/sessions/{id}/plan
+
+Request session state           GET /api/v1/sessions/{id}
+
+Search hotel                    POST /api/v1/tools/hotels/search
+
+Search restaurant               POST /api/v1/tools/restaurants/search
+
+Search attraction               POST /api/v1/tools/attractions/search
+
+Search transport                POST /api/v1/tools/transport/search
+
+Validate candidate plan         POST /api/v1/validation/plan
+
+======================================================================
+6. HEALTH API
+======================================================================
+
+Endpoint:
+
+    GET /api/v1/health
+
+Purpose:
+    Check whether the backend is available.
+
+Frontend usage:
+    Application startup / debugging.
+
+Response:
+
+    {
+      "status": "ok",
+      "service": "planwise-api"
+    }
+
+Possible status:
+
+    200 OK
+
+No user/session information should be returned.
+
+======================================================================
+7. CREATE SESSION API
+======================================================================
+
+Endpoint:
+
+    POST /api/v1/sessions
+
+Purpose:
+    Create a new planning session.
+
+Frontend:
+    Streamlit application.
+
+Request:
+
+    {
+      "user_id": null
+    }
+
+For the current project, user authentication is not required.
+
+Response:
+
+    {
+      "session_id": "generated-session-id",
+      "status": "active"
+    }
+
+The session_id is then used by all subsequent requests.
+
+======================================================================
+8. GET SESSION API
+======================================================================
+
+Endpoint:
+
+    GET /api/v1/sessions/{session_id}
+
+Purpose:
+    Retrieve current planning state.
+
+Response:
+
+    {
+      "session_id": "...",
+      "status": "active",
+      "state": {
+        "location": "Bengaluru",
+        "duration_days": 2,
+        "budget": 2000,
+        "preferences": ["vegetarian"],
+        "interests": [],
+        "chosen_options": [],
+        "current_plan": null
+      }
+    }
+
+Frontend usage:
+    Restore/display current planning context.
+
+======================================================================
+9. SEND MESSAGE API
+======================================================================
+
+Endpoint:
+
+    POST /api/v1/sessions/{session_id}/messages
+
+Purpose:
+    Main frontend-to-agent endpoint.
+
+This is the most important API in the system.
+
+Request:
+
+    {
+      "message": "Plan a two-day trip with a budget of ₹2,000."
+    }
+
+Backend flow:
+
+    Message
+       ↓
+    Intent Understanding
+       ↓
+    State Update
+       ↓
+    Task Decomposition
+       ↓
+    Tool Selection
+       ↓
+    Tool Execution
+       ↓
+    Candidate Plan
+       ↓
+    Constraint Validation
+       ↓
+    Verification
+       ↓
+    Replanning if required
+       ↓
+    Final Response
+
+Response:
+
+    {
+      "session_id": "...",
+      "status": "completed",
+      "intent": {
+        "name": "trip_planning",
+        "location": "Bengaluru",
+        "duration_days": 2,
+        "budget": 2000,
+        "preferences": []
+      },
+      "plan": {
+        "days": []
+      },
+      "validation": {
+        "valid": true,
+        "violations": [],
+        "warnings": []
+      },
+      "message": "..."
+    }
+
+======================================================================
+10. MESSAGE RESPONSE STATES
+======================================================================
+
+The API may return:
+
+completed
+
+    Plan successfully generated.
+
+clarification_required
+
+    Required information is missing.
+
+replanning
+
+    Existing plan is being modified.
+
+constraint_failure
+
+    Requested constraints cannot currently be satisfied.
+
+tool_failure
+
+    Required local tool/data operation failed.
+
+error
+
+    Unexpected application error.
+
+Example clarification response:
+
+    {
+      "status": "clarification_required",
+      "message": "What location would you like to plan for?"
+    }
+
+======================================================================
+11. GET CURRENT PLAN API
+======================================================================
+
+Endpoint:
+
+    GET /api/v1/sessions/{session_id}/plan
+
+Purpose:
+    Return the latest verified plan.
+
+Response:
+
+    {
+      "session_id": "...",
+      "plan": {
+        "location": "Bengaluru",
+        "duration_days": 2,
+        "days": [
+          {
+            "day": 1,
+            "morning": [],
+            "afternoon": [],
+            "evening": []
+          },
+          {
+            "day": 2,
+            "morning": [],
+            "afternoon": [],
+            "evening": []
+          }
+        ],
+        "estimated_cost": 1800
+      },
+      "validation": {
+        "valid": true,
+        "violations": [],
+        "warnings": []
+      }
+    }
+
+======================================================================
+12. REPLAN API
+======================================================================
+
+Endpoint:
+
+    POST /api/v1/sessions/{session_id}/replan
+
+Purpose:
+    Explicitly request replanning after a requirement changes.
+
+Request example:
+
+    {
+      "changes": {
+        "budget": 1500
+      }
+    }
+
+Other examples:
+
+    {
+      "changes": {
+        "preferences": ["vegetarian"]
+      }
+    }
+
+    {
+      "changes": {
+        "duration_days": 1
+      }
+    }
+
+Backend flow:
+
+    Existing State
+         ↓
+    Apply Changes
+         ↓
+    Identify affected requirements
+         ↓
+    Retrieve new information if required
+         ↓
+    Generate revised plan
+         ↓
+    Validate
+         ↓
+    Verify
+         ↓
+    Return updated plan
+
+Response:
+
+    {
+      "session_id": "...",
+      "status": "completed",
+      "changes_applied": {
+        "budget": 1500
+      },
+      "plan": {},
+      "validation": {
+        "valid": true,
+        "violations": [],
+        "warnings": []
+      },
+      "message": "Plan updated for the new budget."
+    }
+
+======================================================================
+13. HOTEL SEARCH API
+======================================================================
+
+Endpoint:
+
+    POST /api/v1/tools/hotels/search
+
+Purpose:
+    Search local/static hotel information.
+
+Request:
+
+    {
+      "location": "Bengaluru",
+      "budget": null,
+      "preferences": []
+    }
+
+Example:
+
+    {
+      "location": "Bengaluru",
+      "budget": 800,
+      "preferences": []
+    }
+
+Backend:
+
+    Hotel API
+       ↓
+    Hotel Tool
+       ↓
+    Retrieval Layer
+       ↓
+    FAISS / Local Data
+       ↓
+    Structured Results
+
+Response:
+
+    {
+      "success": true,
+      "results": [
+        {
+          "name": "...",
+          "location": "...",
+          "price": 700,
+          "details": {}
+        }
+      ]
+    }
+
+IMPORTANT:
+    Results must originate from available local/static data.
+
+======================================================================
+14. RESTAURANT SEARCH API
+======================================================================
+
+Endpoint:
+
+    POST /api/v1/tools/restaurants/search
+
+Request:
+
+    {
+      "location": "Bengaluru",
+      "budget": 500,
+      "preferences": ["vegetarian"]
+    }
+
+Backend:
+
+    Restaurant API
+        ↓
+    Restaurant Tool
+        ↓
+    Retrieval
+        ↓
+    FAISS / Local Data
+
+Response:
+
+    {
+      "success": true,
+      "results": [
+        {
+          "name": "...",
+          "location": "...",
+          "price": 300,
+          "type": "vegetarian"
+        }
+      ]
+    }
+
+======================================================================
+15. ATTRACTION SEARCH API
+======================================================================
+
+Endpoint:
+
+    POST /api/v1/tools/attractions/search
+
+Request:
+
+    {
+      "location": "Bengaluru",
+      "interests": ["history"]
+    }
+
+Response:
+
+    {
+      "success": true,
+      "results": [
+        {
+          "name": "...",
+          "location": "...",
+          "details": {}
+        }
+      ]
+    }
+
+Backend:
+
+    Attraction API
+        ↓
+    Attraction Tool
+        ↓
+    Retrieval
+        ↓
+    FAISS / Local Data
+
+======================================================================
+16. TRANSPORT SEARCH API
+======================================================================
+
+Endpoint:
+
+    POST /api/v1/tools/transport/search
+
+Purpose:
+    Retrieve transport-related information from the selected local
+    dataset/domain data.
+
+Request:
+
+    {
+      "location": "Bengaluru",
+      "source": null,
+      "destination": null
+    }
+
+Response:
+
+    {
+      "success": true,
+      "results": [
+        {
+          "type": "...",
+          "source": "...",
+          "destination": "...",
+          "details": {}
+        }
+      ]
+    }
+
+The transport layer covers the relevant Train and Taxi information
+selected from MultiWOZ.
+
+======================================================================
+17. PLAN VALIDATION API
+======================================================================
+
+Endpoint:
+
+    POST /api/v1/validation/plan
+
+Purpose:
+    Validate a candidate plan independently.
+
+Request:
+
+    {
+      "plan": {},
+      "constraints": {
+        "budget": 2000,
+        "duration_days": 2,
+        "preferences": ["vegetarian"]
+      }
+    }
+
+Response:
+
+    {
+      "valid": false,
+      "violations": [
+        "Estimated cost exceeds budget."
+      ],
+      "warnings": []
+    }
+
+This API should call deterministic Python validation logic.
+
+The LLM should NOT decide whether the budget arithmetic is valid.
+
+======================================================================
+18. INTERNAL LLM SERVICE
+======================================================================
+
+The LLM should NOT be exposed directly to the frontend.
+
+Frontend:
+
+    Streamlit
+       ↓
+    Message API
+       ↓
+    Planner
+       ↓
+    LLM Service
+       ↓
+    Ollama
+       ↓
+    Qwen2.5-3B-Instruct
+
+Internal interface:
+
+    generate(prompt)
+
+and preferably:
+
+    generate_structured(prompt, schema)
+
+Responsibilities:
+- Intent extraction
+- Task decomposition
+- Tool selection
+- Plan generation
+- Replanning
+- Final response generation
+
+The frontend must never send arbitrary prompts directly to Ollama.
+
+======================================================================
+19. INTERNAL RETRIEVAL SERVICE
+======================================================================
+
+The frontend should NOT directly access FAISS.
+
+Flow:
+
+    Frontend
+       ↓
+    Message API
+       ↓
+    Planner
+       ↓
+    Domain Tool
+       ↓
+    Retrieval Service
+       ↓
+    FAISS
+       ↓
+    Local MultiWOZ Data
+
+Internal operations:
+
+    search(domain, query, filters, top_k)
+
+Example:
+
+    search(
+        domain="restaurant",
+        query="vegetarian restaurant in Bengaluru",
+        filters={...},
+        top_k=5
+    )
+
+======================================================================
+20. INTERNAL STATE SERVICE
+======================================================================
+
+The frontend should never directly mutate planning state.
+
+Flow:
+
+    Frontend
+       ↓
+    Message/Replan API
+       ↓
+    Planner
+       ↓
+    State Manager
+
+State:
+
+    location
+    dates
+    duration
+    budget
+    preferences
+    interests
+    subtasks
+    tool_results
+    chosen_options
+    current_plan
+    constraints
+    violations
+
+Recommended implementation:
+
+    Pydantic PlanState
+    +
+    Streamlit session state
+
+======================================================================
+21. FRONTEND COMPONENT → API MAPPING
+======================================================================
+
+STREAMLIT COMPONENT                  API
+
+Chat input
+    → POST /sessions/{id}/messages
+
+New session
+    → POST /sessions
+
+Current plan panel
+    → GET /sessions/{id}/plan
+
+Budget change
+    → POST /sessions/{id}/replan
+
+Preference change
+    → POST /sessions/{id}/replan
+
+Duration change
+    → POST /sessions/{id}/replan
+
+Session restore
+    → GET /sessions/{id}
+
+Backend availability
+    → GET /health
+
+The frontend should not expose internal tool APIs as normal user-facing
+controls unless debugging is explicitly required.
+
+======================================================================
+22. API REQUEST VALIDATION
+======================================================================
+
+All incoming API payloads should be validated using Pydantic.
+
+Examples:
+
+    MessageRequest
+    SessionCreateRequest
+    ReplanRequest
+    HotelSearchRequest
+    RestaurantSearchRequest
+    AttractionSearchRequest
+    TransportSearchRequest
+    PlanValidationRequest
+
+Invalid requests should return a structured error.
+
+Example:
+
+    {
+      "error": {
+        "code": "INVALID_REQUEST",
+        "message": "Budget must be a positive number."
+      }
+    }
+
+======================================================================
+23. ERROR RESPONSE FORMAT
+======================================================================
+
+Use one consistent format.
+
+Example:
+
+    {
+      "error": {
+        "code": "TOOL_FAILURE",
+        "message": "Unable to retrieve restaurant data."
+      }
+    }
+
+Recommended error codes:
+
+    INVALID_REQUEST
+    SESSION_NOT_FOUND
+    MISSING_INFORMATION
+    TOOL_FAILURE
+    NO_RESULTS
+    CONSTRAINT_VIOLATION
+    PLAN_VERIFICATION_FAILED
+    LLM_FAILURE
+    INTERNAL_ERROR
+
+The frontend should display a human-readable message rather than raw
+Python exceptions.
+
+======================================================================
+24. HTTP STATUS CODES
+======================================================================
+
+200 OK
+    Successful operation.
+
+201 CREATED
+    Session successfully created.
+
+400 BAD REQUEST
+    Invalid request parameters.
+
+404 NOT FOUND
+    Session/resource does not exist.
+
+422 UNPROCESSABLE ENTITY
+    Request schema validation failure.
+
+500 INTERNAL SERVER ERROR
+    Unexpected backend error.
+
+503 SERVICE UNAVAILABLE
+    Ollama or another required local service is unavailable.
+
+======================================================================
+25. COMPLETE FRONTEND → BACKEND FLOW
+======================================================================
+
+USER OPENS APPLICATION
+
+    Streamlit
+       ↓
+    GET /api/v1/health
+       ↓
+    Backend available
+       ↓
+    POST /api/v1/sessions
+       ↓
+    session_id
+
+USER ENTERS:
+
+    "Plan a two-day trip with ₹2,000."
+
+       ↓
+
+POST /api/v1/sessions/{id}/messages
+
+       ↓
+
+Application Controller
+
+       ↓
+
+Planning Agent
+
+       ↓
+
+Qwen2.5-3B via Ollama
+
+       ↓
+
+Intent + Parameters
+
+       ↓
+
+Task Decomposition
+
+       ↓
+
+Tool Registry
+
+       ↓
+
+Hotel / Restaurant / Attraction / Transport Tools
+
+       ↓
+
+FAISS
+
+       ↓
+
+MultiWOZ local data
+
+       ↓
+
+State Update
+
+       ↓
+
+Schedule Generation
+
+       ↓
+
+Constraint Engine
+
+       ↓
+
+Plan Verification
+
+       ↓
+
+Final Response
+
+       ↓
+
+Frontend
+
+======================================================================
+26. REPLANNING FLOW
+======================================================================
+
+USER:
+
+    "Reduce my budget to ₹1,500."
+
+       ↓
+
+POST /api/v1/sessions/{id}/replan
+
+       ↓
+
+Replan Service
+
+       ↓
+
+Existing PlanState
+
+       ↓
+
+Budget update
+
+       ↓
+
+Affected options identified
+
+       ↓
+
+Retrieval / tools if necessary
+
+       ↓
+
+New candidate plan
+
+       ↓
+
+Constraint validation
+
+       ↓
+
+Verification
+
+       ↓
+
+Updated plan
+
+       ↓
+
+Frontend
+
+======================================================================
+27. API SECURITY BOUNDARY
+======================================================================
+
+The LLM is never trusted to directly execute an arbitrary API operation.
+
+Correct:
+
+    LLM
+      ↓
+    Structured tool request
+      ↓
+    Pydantic validation
+      ↓
+    Tool registry
+      ↓
+    Approved Python function
+      ↓
+    Local data
+
+Incorrect:
+
+    LLM
+      ↓
+    Arbitrary Python/code/API execution
+
+All tool calls must be explicitly registered.
+
+======================================================================
+28. API RESPONSIBILITY BOUNDARIES
+======================================================================
+
+FRONTEND:
+- Collect input.
+- Display state/results.
+- Send API requests.
+- Render errors.
+
+APPLICATION API:
+- Authenticate/validate request if applicable.
+- Load session.
+- Call planner.
+- Return structured result.
+
+PLANNER:
+- Understand.
+- Decompose.
+- Select tools.
+- Plan.
+- Replan.
+
+LLM SERVICE:
+- Language and reasoning operations.
+
+TOOLS:
+- Controlled domain retrieval.
+
+RETRIEVAL:
+- Search local data.
+
+STATE:
+- Maintain planning context.
+
+CONSTRAINT ENGINE:
+- Deterministic validation.
+
+VERIFIER:
+- Final correctness checks.
+
+======================================================================
+29. MINIMUM API SET FOR THE ACTUAL PROJECT
+======================================================================
+
+For the first implementation, only these user-facing contracts are
+strictly required:
+
+    POST /sessions
+    POST /sessions/{session_id}/messages
+    GET  /sessions/{session_id}
+    GET  /sessions/{session_id}/plan
+    POST /sessions/{session_id}/replan
+    GET  /health
+
+The following are internal service contracts:
+
+    POST /tools/hotels/search
+    POST /tools/restaurants/search
+    POST /tools/attractions/search
+    POST /tools/transport/search
+    POST /validation/plan
+
+If Streamlit directly calls Python functions, these do not need to be
+implemented as HTTP endpoints. They remain clean internal service
+interfaces.
+
+======================================================================
+30. RECOMMENDED IMPLEMENTATION
+======================================================================
+
+For the current project:
+
+    Streamlit
+        ↓
+    Python Controller
+        ↓
+    Planner
+        ↓
+    Python State Machine
+        ↓
+    Qwen2.5-3B / Ollama
+        ↓
+    Tool Registry
+        ↓
+    Retrieval / FAISS
+        ↓
+    MultiWOZ
+        ↓
+    Constraint Engine
+        ↓
+    Verifier
+        ↓
+    Response
+
+Do NOT add a REST server merely for the sake of having APIs.
+
+If an actual HTTP API is required by the project later, introduce a
+thin FastAPI layer over these same Python services.
+
+The business logic must remain independent of HTTP.
+
+======================================================================
+31. FINAL API CONTRACT SUMMARY
+======================================================================
+
+                    STREAMLIT FRONTEND
+                           |
+             +-------------+-------------+
+             |             |             |
+             ▼             ▼             ▼
+          MESSAGE        PLAN         REPLAN
+            API           API           API
+             |             |             |
+             +-------------+-------------+
+                           |
+                           ▼
+                   APPLICATION LAYER
+                           |
+                           ▼
+                    PLANNING AGENT
+                           |
+              +------------+------------+
+              |            |            |
+              ▼            ▼            ▼
+             LLM         TOOLS        STATE
+              |            |            |
+           Ollama       Retrieval    Pydantic
+              |            |
+        Qwen2.5-3B       FAISS
+                           |
+                      MultiWOZ 2.2
+                           |
+                           ▼
+                    VALIDATION
+                           |
+                           ▼
+                     VERIFIER
+                           |
+                           ▼
+                      RESPONSE
+                           |
+                           ▼
+                       FRONTEND
+
+======================================================================
+32. FINAL API LIST
+======================================================================
+
+USER-FACING:
+
+GET
+    /api/v1/health
+
+POST
+    /api/v1/sessions
+
+GET
+    /api/v1/sessions/{session_id}
+
+POST
+    /api/v1/sessions/{session_id}/messages
+
+GET
+    /api/v1/sessions/{session_id}/plan
+
+POST
+    /api/v1/sessions/{session_id}/replan
+
+
+INTERNAL TOOL CONTRACTS:
+
+POST
+    /api/v1/tools/hotels/search
+
+POST
+    /api/v1/tools/restaurants/search
+
+POST
+    /api/v1/tools/attractions/search
+
+POST
+    /api/v1/tools/transport/search
+
+
+INTERNAL VALIDATION CONTRACT:
+
+POST
+    /api/v1/validation/plan
+
+
+INTERNAL SERVICES — NOT FRONTEND ENDPOINTS:
+
+LLM Service
+    generate()
+    generate_structured()
+
+Retrieval Service
+    search()
+
+State Manager
+    get_state()
+    update_state()
+
+Constraint Engine
+    validate_plan()
+
+Verifier
+    verify_plan()
+
+Tool Registry
+    execute_tool()
+
+======================================================================
+33. FINAL ENGINEERING RULE
+======================================================================
+
+The frontend should know only about:
+
+    Session
+    Message
+    Plan
+    Replan
+    Health
+
+The frontend should NOT know about:
+
+    Qwen
+    Ollama
+    FAISS
+    MultiWOZ
+    Prompt engineering
+    Tool implementation
+    Constraint implementation
+    Agent state transitions
+
+This keeps the frontend thin and the backend modular.
+
+The backend can therefore evolve internally without requiring changes
+to the Streamlit UI.
+
+======================================================================
+END OF DOCUMENT
+======================================================================

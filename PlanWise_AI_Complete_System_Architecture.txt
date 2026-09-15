@@ -1,0 +1,1771 @@
+PLANWISE AI — COMPLETE SYSTEM ARCHITECTURE
+Senior Software Engineering Design Specification
+
+Project: PlanWise AI — Agentic Personal Task and Trip Planning Assistant
+Deadline: 30-10-2026
+Primary model: Qwen2.5-3B-Instruct
+Runtime: Ollama
+UI: Streamlit
+Retrieval: FAISS
+Validation/schema layer: Pydantic
+Dataset: MultiWOZ 2.2
+Orchestration: Plain Python state machine or LangGraph
+
+======================================================================
+1. ARCHITECTURE OBJECTIVE
+======================================================================
+
+PlanWise AI should implement one reliable end-to-end agentic planning
+loop:
+
+User Goal
+    ↓
+Input / Session Layer
+    ↓
+Goal Understanding
+    ↓
+Task Decomposition
+    ↓
+Plan Execution / Tool Selection
+    ↓
+Local Information Retrieval
+    ↓
+State Update
+    ↓
+Constraint Validation
+    ↓
+Schedule Generation
+    ↓
+Plan Verification
+    ↓
+Final Response
+
+For a changed requirement:
+
+Existing State
+    ↓
+New User Request
+    ↓
+Change Detection
+    ↓
+State Update
+    ↓
+Selective Replanning
+    ↓
+Tool Retrieval if required
+    ↓
+Constraint Validation
+    ↓
+Schedule Regeneration
+    ↓
+Verification
+    ↓
+Updated Response
+
+The architecture must remain intentionally simple. The project does not
+need multiple expensive LLMs, paid APIs, booking systems, maps, or a
+complex distributed backend.
+
+======================================================================
+2. HIGH-LEVEL SYSTEM ARCHITECTURE
+======================================================================
+
+                         ┌──────────────────────┐
+                         │        USER          │
+                         └──────────┬───────────┘
+                                    │
+                                    ▼
+                         ┌──────────────────────┐
+                         │     STREAMLIT UI     │
+                         │  Input + Chat + Plan │
+                         └──────────┬───────────┘
+                                    │
+                                    ▼
+                         ┌──────────────────────┐
+                         │   APPLICATION LAYER  │
+                         │ Session / Controller │
+                         └──────────┬───────────┘
+                                    │
+                                    ▼
+                    ┌──────────────────────────────┐
+                    │       PLANNING AGENT         │
+                    │                              │
+                    │  1. Understand               │
+                    │  2. Decompose                │
+                    │  3. Select tools             │
+                    │  4. Execute                 │
+                    │  5. Plan / Replan            │
+                    └──────────────┬───────────────┘
+                                   │
+                ┌──────────────────┼──────────────────┐
+                │                  │                  │
+                ▼                  ▼                  ▼
+      ┌────────────────┐ ┌────────────────┐ ┌────────────────┐
+      │  STATE MANAGER │ │  TOOL REGISTRY │ │  LLM SERVICE   │
+      │                │ │                │ │                │
+      │ location       │ │ hotel          │ │ Qwen2.5-3B     │
+      │ dates          │ │ restaurant     │ │ via Ollama     │
+      │ budget         │ │ attraction     │ │                │
+      │ preferences    │ │ transport      │ │                │
+      │ chosen options │ │                │ │                │
+      └────────────────┘ └───────┬────────┘ └────────────────┘
+                                 │
+                                 ▼
+                       ┌─────────────────────┐
+                       │   RETRIEVAL LAYER   │
+                       │                     │
+                       │ Query normalization │
+                       │ FAISS search        │
+                       │ Filtering           │
+                       │ Ranking             │
+                       └──────────┬──────────┘
+                                  │
+                                  ▼
+                       ┌─────────────────────┐
+                       │    LOCAL DATA       │
+                       │                     │
+                       │ MultiWOZ 2.2        │
+                       │ Processed records   │
+                       │ Domain documents    │
+                       └─────────────────────┘
+
+Planning output
+       │
+       ▼
+┌──────────────────────┐
+│ CONSTRAINT ENGINE    │
+│ budget               │
+│ duration             │
+│ preferences          │
+│ required activities  │
+└──────────┬───────────┘
+           │
+           ▼
+┌──────────────────────┐
+│ PLAN VERIFIER        │
+│ consistency          │
+│ constraints          │
+│ retrieved evidence   │
+└──────────┬───────────┘
+           │
+           ▼
+┌──────────────────────┐
+│ RESPONSE GENERATOR   │
+│ structured → natural │
+└──────────┬───────────┘
+           │
+           ▼
+        STREAMLIT
+
+======================================================================
+3. ARCHITECTURAL LAYERS
+======================================================================
+
+3.1 Presentation Layer
+
+Technology:
+- Streamlit
+
+Responsibilities:
+- Accept user input.
+- Display conversation.
+- Display generated plans.
+- Display updated plans.
+- Preserve the current UI session.
+- Surface useful validation/error messages.
+
+The UI must not contain planning logic.
+
+Main entry point:
+    app.py
+
+The UI calls the application/controller layer and receives a structured
+result.
+
+--------------------------------------------------
+
+3.2 Application / Controller Layer
+
+Responsibilities:
+- Receive a user request from Streamlit.
+- Load/create the current agent state.
+- Invoke the planner.
+- Return the final result to the UI.
+- Keep orchestration outside the UI.
+
+Conceptually:
+
+    handle_user_message(message, session_state)
+        -> planner.run(message, session_state)
+        -> updated_state + response
+
+--------------------------------------------------
+
+3.3 Agent Layer
+
+The agent layer is the central intelligence/orchestration component.
+
+Responsibilities:
+- Understand intent.
+- Extract parameters.
+- Decompose goals.
+- Decide which tools are required.
+- Execute the plan.
+- Update state.
+- Trigger validation.
+- Generate or regenerate a schedule.
+
+Recommended implementation:
+- A plain Python state machine for the fastest reliable implementation.
+- LangGraph can replace the state machine if desired.
+
+Do not create multiple independent LLM agents unless necessary.
+
+A single Qwen2.5-3B-Instruct model can sequentially perform:
+- intent extraction
+- planning
+- structured decision generation
+- response generation
+
+--------------------------------------------------
+
+3.4 State Layer
+
+The state layer stores all information needed to continue the current
+conversation.
+
+Minimum state:
+
+    location
+    dates / duration
+    budget
+    preferences
+    chosen_options
+
+Recommended internal state:
+
+    conversation_history
+    current_goal
+    intent
+    subtasks
+    tool_results
+    constraints
+    selected_options
+    current_plan
+    validation_result
+
+State should be represented using Pydantic models where practical.
+
+Example conceptual state:
+
+    PlanState
+        goal
+        intent
+        location
+        dates
+        duration
+        budget
+        preferences
+        interests
+        subtasks
+        tool_results
+        chosen_options
+        plan
+        violations
+        status
+
+The state is the source of truth for the current planning session.
+
+--------------------------------------------------
+
+3.5 LLM Service Layer
+
+The LLM service provides one controlled interface to Qwen2.5-3B-Instruct
+running through Ollama.
+
+Responsibilities:
+- Send structured prompts.
+- Request structured output.
+- Parse model responses.
+- Handle malformed output.
+- Keep LLM-specific code out of the rest of the application.
+
+Conceptual interface:
+
+    llm.generate(prompt)
+    llm.generate_structured(prompt, schema)
+
+The planner should not directly depend on raw Ollama calls throughout
+the codebase.
+
+--------------------------------------------------
+
+3.6 Tool Layer
+
+The tool layer exposes domain-specific retrieval operations.
+
+Required tools:
+
+    search_hotel()
+    search_restaurant()
+    search_attraction()
+    search_transport()
+
+Responsibilities:
+- Accept structured parameters.
+- Query local/static data.
+- Return structured results.
+- Never fabricate results.
+
+Tools should be deterministic.
+
+Conceptual interface:
+
+    search_hotel(
+        location,
+        budget=None,
+        preferences=None
+    )
+
+    search_restaurant(
+        location,
+        preferences=None,
+        budget=None
+    )
+
+    search_attraction(
+        location,
+        interests=None
+    )
+
+    search_transport(
+        location,
+        source=None,
+        destination=None
+    )
+
+--------------------------------------------------
+
+3.7 Retrieval Layer
+
+The retrieval layer sits below the domain tools.
+
+Pipeline:
+
+    User/Agent Query
+          ↓
+    Query Normalization
+          ↓
+    Metadata / Domain Filtering
+          ↓
+    FAISS Similarity Search
+          ↓
+    Result Filtering
+          ↓
+    Ranking
+          ↓
+    Structured Tool Result
+
+The retrieval layer should not generate answers.
+
+Its job is to find relevant records.
+
+--------------------------------------------------
+
+3.8 Data Layer
+
+The project uses MultiWOZ 2.2 as the primary dataset.
+
+Relevant domains:
+
+    Hotel
+    Restaurant
+    Attraction
+    Train
+    Taxi
+
+Data should be transformed into application-friendly local records.
+
+Recommended conceptual structure:
+
+    raw MultiWOZ
+         ↓
+    preprocessing
+         ↓
+    normalized records
+         ↓
+    domain-specific data
+         ↓
+    searchable documents
+         ↓
+    FAISS index
+
+No paid third-party travel APIs are required.
+
+--------------------------------------------------
+
+3.9 Constraint Layer
+
+The constraint engine performs deterministic validation.
+
+Responsibilities:
+- Check budget.
+- Check duration.
+- Check preferences.
+- Check required activities.
+- Identify conflicts.
+- Report violations.
+
+The constraint engine should not depend on the LLM for arithmetic or
+basic rule checking.
+
+Example:
+
+    total_cost <= budget
+
+If false:
+
+    violation = "Budget exceeded"
+
+The planner then decides whether to replan.
+
+--------------------------------------------------
+
+3.10 Verification Layer
+
+The verifier checks the final plan before it is shown to the user.
+
+Checks include:
+- Plan contains requested components.
+- Options came from available retrieved data.
+- Budget is respected.
+- Duration is respected.
+- Preferences are respected where applicable.
+- Schedule is internally coherent.
+- No known constraint violation remains.
+
+If verification fails:
+
+    plan
+      ↓
+    verifier
+      ↓
+    failure
+      ↓
+    planner / replanner
+      ↓
+    new plan
+
+--------------------------------------------------
+
+3.11 Response Layer
+
+The response generator converts the verified structured plan into a
+clear user-facing response.
+
+The response should contain:
+- Schedule.
+- Relevant options.
+- Budget information where applicable.
+- Important constraint notes.
+- Replanning explanation where relevant.
+
+The response generator should not introduce facts absent from the
+structured plan/retrieved data.
+
+======================================================================
+4. CORE EXECUTION FLOW
+======================================================================
+
+The normal execution flow should be:
+
+STEP 1 — RECEIVE
+
+User sends a natural-language request.
+
+Example:
+
+    "Plan a two-day trip with a ₹2,000 budget."
+
+STEP 2 — UNDERSTAND
+
+Extract:
+- intent
+- location
+- duration
+- budget
+- preferences
+- interests
+- requested activities
+
+STEP 3 — VALIDATE INPUT
+
+Check whether enough information exists.
+
+If essential information is missing, ask the user instead of guessing.
+
+STEP 4 — DECOMPOSE
+
+Convert the goal into subtasks.
+
+Example:
+
+    search_attractions
+    search_restaurants
+    search_transport
+    build_schedule
+    check_budget
+
+STEP 5 — SELECT TOOLS
+
+Map subtasks to tools.
+
+Example:
+
+    search_attractions -> search_attraction()
+    search_restaurants -> search_restaurant()
+    search_transport -> search_transport()
+
+STEP 6 — EXECUTE TOOLS
+
+Call tools with structured parameters.
+
+STEP 7 — UPDATE STATE
+
+Store:
+- retrieved options
+- chosen options
+- constraints
+- relevant user preferences
+
+STEP 8 — GENERATE CANDIDATE PLAN
+
+Create a schedule using the retrieved options.
+
+STEP 9 — CONSTRAINT CHECK
+
+Run deterministic checks.
+
+STEP 10 — VERIFY
+
+Check the plan for consistency and unsupported information.
+
+STEP 11 — REPLAN IF REQUIRED
+
+If constraints fail, revise the plan.
+
+STEP 12 — RESPOND
+
+Return the verified final plan to the user.
+
+======================================================================
+5. REPLANNING ARCHITECTURE
+======================================================================
+
+Replanning is a first-class operation.
+
+Example:
+
+Initial:
+
+    "Plan two days in Bengaluru with ₹2,000."
+
+State:
+
+    location = Bengaluru
+    duration = 2 days
+    budget = 2000
+
+User:
+
+    "Reduce the budget to ₹1,500."
+
+The system should NOT rebuild the conversation from scratch.
+
+Flow:
+
+    New message
+         ↓
+    Change extraction
+         ↓
+    Existing state
+         ↓
+    Update budget
+         ↓
+    Determine affected tasks
+         ↓
+    Reuse unaffected information
+         ↓
+    Re-run affected retrieval/planning
+         ↓
+    Validate
+         ↓
+    Verify
+         ↓
+    Return revised plan
+
+This makes the system genuinely stateful.
+
+======================================================================
+6. SELECTIVE REPLANNING
+======================================================================
+
+The architecture should avoid unnecessary work.
+
+Examples:
+
+If budget changes:
+    - Recheck cost-sensitive options.
+    - Regenerate schedule.
+    - Revalidate budget.
+
+If vegetarian preference changes:
+    - Recheck restaurant selection.
+    - Preserve unrelated attractions.
+    - Regenerate affected portions.
+
+If duration changes:
+    - Recalculate schedule.
+    - Re-evaluate attraction count.
+    - Revalidate constraints.
+
+If location changes:
+    - Existing location-specific retrieval results become invalid.
+    - Re-run relevant searches.
+
+The implementation can initially use full replanning for simplicity.
+Selective replanning is the preferred architectural behavior when easy
+to implement.
+
+======================================================================
+7. DATA FLOW
+======================================================================
+
+User message:
+
+    "Plan a one-day trip under ₹2,000 with vegetarian food."
+
+                        ↓
+
+Goal Parser:
+
+    intent = trip_planning
+    duration = 1 day
+    budget = 2000
+    preference = vegetarian
+
+                        ↓
+
+Planner:
+
+    search_attractions
+    search_restaurants
+    search_transport
+    build_schedule
+    check_budget
+
+                        ↓
+
+Tools:
+
+    Attraction Tool
+    Restaurant Tool
+    Transport Tool
+
+                        ↓
+
+Retrieval:
+
+    FAISS → relevant local records
+
+                        ↓
+
+State:
+
+    store retrieved and selected options
+
+                        ↓
+
+Schedule Generator:
+
+    candidate plan
+
+                        ↓
+
+Constraint Engine:
+
+    budget?
+    duration?
+    vegetarian?
+
+                        ↓
+
+Verifier:
+
+    valid?
+
+                   YES / NO
+                    /     \
+                  YES      NO
+                   |        |
+                   |      Replan
+                   |        |
+                   |<-------/
+                   ↓
+             Final Response
+
+======================================================================
+8. STRUCTURED DATA CONTRACTS
+======================================================================
+
+Pydantic should define important boundaries.
+
+Example conceptual models:
+
+UserRequest:
+    message: str
+
+IntentResult:
+    intent: str
+    location: optional str
+    duration: optional int
+    budget: optional float
+    preferences: list
+    interests: list
+
+Task:
+    task_id: str
+    task_type: str
+    parameters: dict
+    status: str
+
+ToolResult:
+    tool_name: str
+    success: bool
+    results: list
+    error: optional str
+
+ConstraintResult:
+    valid: bool
+    violations: list
+    warnings: list
+
+Plan:
+    location: str
+    days: list
+    estimated_cost: optional float
+    assumptions: list
+
+AgentResponse:
+    plan: optional Plan
+    message: str
+    state: PlanState
+
+The exact implementation can be simplified, but the interfaces should
+remain structured.
+
+======================================================================
+9. TOOL REGISTRY
+======================================================================
+
+The planner should use a central tool registry.
+
+Conceptually:
+
+    TOOL_REGISTRY = {
+        "hotel_search": search_hotel,
+        "restaurant_search": search_restaurant,
+        "attraction_search": search_attraction,
+        "transport_search": search_transport
+    }
+
+This provides:
+- Clear tool discovery.
+- Easy extension within the existing project scope.
+- Centralized tool invocation.
+- Better testing.
+
+The LLM should output a tool name and structured arguments. The
+application validates the requested tool before execution.
+
+======================================================================
+10. LLM OUTPUT CONTRACT
+======================================================================
+
+Prefer structured output instead of unrestricted natural language for
+intermediate agent decisions.
+
+Example:
+
+    {
+      "intent": "trip_planning",
+      "location": "Bengaluru",
+      "duration": 2,
+      "budget": 2000,
+      "preferences": ["vegetarian"]
+    }
+
+Planner output:
+
+    {
+      "tasks": [
+        {
+          "type": "search_attractions",
+          "parameters": {
+            "location": "Bengaluru"
+          }
+        },
+        {
+          "type": "search_restaurants",
+          "parameters": {
+            "location": "Bengaluru",
+            "preference": "vegetarian"
+          }
+        }
+      ]
+    }
+
+The Python layer validates these outputs before execution.
+
+======================================================================
+11. PROMPT ARCHITECTURE
+======================================================================
+
+Keep prompts separated from Python implementation.
+
+Recommended prompt categories:
+
+    intent_prompt
+    decomposition_prompt
+    tool_selection_prompt
+    schedule_prompt
+    replanning_prompt
+    response_prompt
+
+Prompts should clearly tell the model:
+- What role it is performing.
+- What state it receives.
+- What information it may use.
+- What output schema is expected.
+- That it must not invent unavailable data.
+
+Do not create unnecessarily complicated prompt chains.
+
+======================================================================
+12. CONSTRAINT ENGINE DESIGN
+======================================================================
+
+Constraints should be represented explicitly.
+
+Example:
+
+    constraints = {
+        "budget": 2000,
+        "duration_days": 2,
+        "preferences": ["vegetarian"]
+    }
+
+Validation functions can include:
+
+    check_budget(plan, budget)
+    check_duration(plan, duration)
+    check_preferences(plan, preferences)
+    check_required_components(plan, requirements)
+
+Then:
+
+    validate_plan(plan, constraints)
+
+returns:
+
+    valid
+    violations
+    warnings
+
+The constraint engine should be deterministic and unit-testable.
+
+======================================================================
+13. HALLUCINATION-CONTROL ARCHITECTURE
+======================================================================
+
+The most important boundary is:
+
+    Retrieved Data → Planning → Validation → Response
+
+rather than:
+
+    User → LLM → invented facts
+
+Rules:
+1. Domain facts should originate from local data/tool results.
+2. Tool results should be structured.
+3. The planner should only select from available results.
+4. Budget calculations should be programmatic.
+5. Constraint checks should be programmatic.
+6. The verifier should reject unsupported selections.
+7. Missing information should trigger clarification rather than
+   fabrication.
+
+======================================================================
+14. ERROR-HANDLING FLOW
+======================================================================
+
+Case A — Missing information
+
+    User request
+        ↓
+    Required parameter missing
+        ↓
+    Ask clarification
+        ↓
+    Wait for user
+
+Case B — No retrieval results
+
+    Tool
+      ↓
+    No result
+      ↓
+    Planner informed
+      ↓
+    Try another valid option / explain limitation
+
+Case C — Tool failure
+
+    Tool
+      ↓
+    Error
+      ↓
+    Structured failure
+      ↓
+    Controlled response
+
+Case D — Constraint violation
+
+    Candidate plan
+        ↓
+    Validator
+        ↓
+    Violation
+        ↓
+    Replan
+
+Case E — Impossible constraints
+
+    Validator
+        ↓
+    Cannot satisfy constraints
+        ↓
+    Explain conflict
+        ↓
+    Ask user to relax a constraint if needed
+
+======================================================================
+15. SESSION AND CONVERSATION STATE
+======================================================================
+
+For the project scope, Streamlit session state is sufficient.
+
+Conceptually:
+
+    st.session_state["plan_state"]
+
+This should contain the current PlanState.
+
+The system should preserve:
+- Conversation history.
+- Current goal.
+- Extracted constraints.
+- Preferences.
+- Selected options.
+- Current plan.
+
+No external database is required for the core project.
+
+======================================================================
+16. RETRIEVAL ARCHITECTURE
+======================================================================
+
+Recommended indexing flow:
+
+    MultiWOZ raw data
+          ↓
+    Domain filtering
+          ↓
+    Normalization
+          ↓
+    Document/record creation
+          ↓
+    Embedding generation
+          ↓
+    FAISS index
+          ↓
+    Persist local index
+
+At runtime:
+
+    Search query
+          ↓
+    Domain filter
+          ↓
+    FAISS top-k
+          ↓
+    Metadata filtering
+          ↓
+    Ranked records
+          ↓
+    ToolResult
+
+Metadata should be used wherever possible to avoid returning irrelevant
+records.
+
+======================================================================
+17. DOMAIN TOOL ARCHITECTURE
+======================================================================
+
+Hotel:
+
+    input:
+        location
+        budget
+        preferences
+
+    output:
+        matching hotel records
+
+Restaurant:
+
+    input:
+        location
+        budget
+        preferences
+
+    output:
+        matching restaurant records
+
+Attraction:
+
+    input:
+        location
+        interests
+
+    output:
+        matching attraction records
+
+Transport:
+
+    input:
+        location
+        source/destination where available
+        timing where available
+
+    output:
+        matching transport records
+
+Train and taxi information from the selected MultiWOZ domains can be
+used through the transport tool layer.
+
+======================================================================
+18. PLAN GENERATION ARCHITECTURE
+======================================================================
+
+Plan generation should consume:
+
+    User constraints
+    +
+    Retrieved options
+    +
+    Current state
+    +
+    Decomposed tasks
+
+The model generates a candidate structured plan.
+
+Python then validates it.
+
+Conceptual flow:
+
+    retrieved_options
+          +
+    constraints
+          +
+    task_requirements
+          ↓
+    schedule_prompt
+          ↓
+    Qwen2.5-3B
+          ↓
+    structured candidate plan
+          ↓
+    Pydantic validation
+          ↓
+    Constraint engine
+          ↓
+    verifier
+
+======================================================================
+19. RESPONSE ARCHITECTURE
+======================================================================
+
+The final response should be generated only after verification.
+
+Preferred structure:
+
+    Trip Plan
+
+    Day 1
+      Morning
+      Afternoon
+      Evening
+
+    Day 2
+      Morning
+      Afternoon
+      Evening
+
+    Estimated Budget
+      ...
+
+    Preferences Applied
+      ...
+
+    Notes / Constraints
+      ...
+
+For an impossible request:
+
+    Constraint Issue
+      ...
+
+    Why the requested plan cannot be satisfied
+      ...
+
+    What can be changed
+      ...
+
+======================================================================
+20. OBSERVABILITY / DEBUGGING
+======================================================================
+
+Even though this is a student project, the architecture should make
+agent behavior easy to debug.
+
+Maintain a lightweight execution trace containing:
+
+    user_message
+    extracted_intent
+    tasks
+    tool_calls
+    tool_results
+    state_changes
+    validation_results
+    replanning_count
+    final_status
+
+This does not need a separate observability platform.
+
+During development, a simple debug mode or Python logging is enough.
+
+======================================================================
+21. TESTING ARCHITECTURE
+======================================================================
+
+Testing should happen at three levels.
+
+LEVEL 1 — Unit Tests
+
+Test:
+- schemas
+- intent parsing
+- state updates
+- tools
+- constraint checks
+- plan validation
+
+LEVEL 2 — Agent Tests
+
+Test:
+- intent → tasks
+- tasks → tools
+- tools → state
+- state → plan
+- violation → replan
+
+LEVEL 3 — End-to-End Tests
+
+Test complete user conversations.
+
+Important scenarios:
+1. Simple hotel search.
+2. Restaurant search.
+3. Attraction search.
+4. Multi-domain trip.
+5. Budget-constrained trip.
+6. Replanning after budget change.
+7. Preference memory.
+8. Impossible constraints.
+9. Changed preference.
+10. Missing parameter/tool failure.
+
+======================================================================
+22. PERFORMANCE ARCHITECTURE
+======================================================================
+
+The system is designed for local execution.
+
+Primary latency sources:
+- Qwen2.5-3B inference.
+- Retrieval.
+- Multiple sequential planning steps.
+
+Keep latency reasonable by:
+- Reusing state.
+- Avoiding unnecessary LLM calls.
+- Avoiding duplicate retrieval.
+- Using deterministic Python logic for validation.
+- Using one small model.
+- Keeping prompts concise.
+- Limiting retrieval results to relevant top-k records.
+
+Do not optimize prematurely.
+
+Measure:
+- Total response latency.
+- LLM latency.
+- Retrieval latency.
+- Number of LLM calls.
+- Number of tool calls.
+
+======================================================================
+23. SECURITY / SAFETY BOUNDARIES
+======================================================================
+
+For this project, security requirements should remain lightweight.
+
+Important boundaries:
+- Validate tool names.
+- Validate structured parameters.
+- Never execute arbitrary code generated by the LLM.
+- Never allow the model to directly access the filesystem through
+  arbitrary commands.
+- Keep tool functions explicitly defined.
+- Treat LLM output as untrusted input.
+- Validate all structured outputs before execution.
+
+The LLM should request an operation; Python decides whether and how that
+operation executes.
+
+======================================================================
+24. DEPLOYMENT ARCHITECTURE
+======================================================================
+
+PRIMARY — LOCAL
+
+    User
+      ↓
+    Streamlit
+      ↓
+    Python Agent
+      ↓
+    Ollama
+      ↓
+    Qwen2.5-3B
+      ↓
+    Local Tools
+      ↓
+    Local MultiWOZ / FAISS
+      ↓
+    Validation
+      ↓
+    Response
+
+This should be the primary target because it is simple and avoids paid
+services.
+
+OPTIONAL CLOUD
+
+    User
+      ↓
+    Streamlit / API
+      ↓
+    Application
+      ↓
+    Agent
+      ↓
+    Cloud-hosted runtime
+
+AWS Lambda/API Gateway or Google Cloud Run may be considered only as
+optional deployment paths. They are not necessary for the core
+implementation.
+
+======================================================================
+25. RECOMMENDED PROJECT DIRECTORY
+======================================================================
+
+planwise-ai/
+│
+├── app.py
+│
+├── agent/
+│   ├── planner.py
+│   ├── prompts.py
+│   ├── state.py
+│   └── schemas.py
+│
+├── llm/
+│   └── ollama_client.py
+│
+├── tools/
+│   ├── registry.py
+│   ├── hotel.py
+│   ├── restaurant.py
+│   ├── attraction.py
+│   └── transport.py
+│
+├── retrieval/
+│   ├── index.py
+│   ├── search.py
+│   └── embeddings.py
+│
+├── data/
+│   ├── raw/
+│   ├── processed/
+│   └── index/
+│
+├── validation/
+│   ├── constraints.py
+│   └── verifier.py
+│
+├── evaluation/
+│   ├── test_cases.json
+│   └── evaluate.py
+│
+├── tests/
+│   ├── test_tools.py
+│   ├── test_state.py
+│   ├── test_constraints.py
+│   └── test_agent.py
+│
+├── requirements.txt
+├── README.md
+└── .env.example
+
+This structure can be simplified if implementation speed requires it.
+
+======================================================================
+26. RESPONSIBILITY MATRIX
+======================================================================
+
+Component              Responsibility
+
+Streamlit               UI and user interaction
+
+Application Controller  Request/session orchestration
+
+Planner Agent            Understand, decompose, plan, replan
+
+LLM Service              Qwen2.5-3B communication
+
+State Manager             Maintain current planning state
+
+Tool Registry             Map agent actions to safe Python functions
+
+Domain Tools              Search specific domain data
+
+Retrieval                 Find relevant local records
+
+FAISS                     Vector similarity search
+
+Constraint Engine         Deterministic rule validation
+
+Verifier                  Final plan correctness check
+
+Response Generator        Convert verified plan into user response
+
+Evaluation                Measure system behavior
+
+======================================================================
+27. DEPENDENCY DIRECTION
+======================================================================
+
+Keep dependencies flowing in one direction:
+
+    UI
+     ↓
+    Application
+     ↓
+    Agent
+     ↓
+    Services / Tools / State
+     ↓
+    Retrieval / Data
+
+Validation should remain independently callable by the agent.
+
+Avoid:
+- UI importing retrieval internals.
+- Tools directly modifying UI state.
+- LLM client containing business logic.
+- Constraint logic inside prompts.
+- Random modules making uncontrolled model calls.
+
+======================================================================
+28. STATE TRANSITION MODEL
+======================================================================
+
+The agent can be modeled with these states:
+
+    RECEIVED
+       ↓
+    UNDERSTANDING
+       ↓
+    DECOMPOSING
+       ↓
+    EXECUTING
+       ↓
+    PLANNING
+       ↓
+    VALIDATING
+       ↓
+    VERIFYING
+       ↓
+    COMPLETED
+
+Failure:
+
+    any state
+       ↓
+    ERROR / RECOVERY
+
+Replanning:
+
+    VALIDATING
+       ↓
+    CONSTRAINT_VIOLATION
+       ↓
+    REPLANNING
+       ↓
+    EXECUTING / PLANNING
+       ↓
+    VALIDATING
+
+Clarification:
+
+    UNDERSTANDING
+       ↓
+    MISSING_INFORMATION
+       ↓
+    WAITING_FOR_USER
+       ↓
+    UNDERSTANDING
+
+======================================================================
+29. CORE ALGORITHM
+======================================================================
+
+High-level pseudocode:
+
+    handle_message(message, state):
+
+        request = understand(message, state)
+
+        state = update_state(state, request)
+
+        if missing_required_information(state):
+            return clarification_response(state)
+
+        tasks = decompose_goal(state)
+
+        for task in tasks:
+
+            if task.requires_tool:
+                result = execute_tool(task)
+                state = update_with_result(state, result)
+
+        candidate_plan = generate_plan(state)
+
+        validation = validate(candidate_plan, state)
+
+        if not validation.valid:
+
+            state.violations = validation.violations
+
+            candidate_plan = replan(state)
+
+            validation = validate(candidate_plan, state)
+
+        if not validation.valid:
+            return explain_constraint_failure(state)
+
+        verification = verify(candidate_plan, state)
+
+        if not verification.valid:
+            return recovery_or_replan(state)
+
+        state.current_plan = candidate_plan
+
+        return generate_response(candidate_plan, state)
+
+======================================================================
+30. ARCHITECTURAL DECISIONS
+======================================================================
+
+DECISION 1 — One small LLM
+
+Use Qwen2.5-3B-Instruct for all language/planning roles.
+
+Reason:
+- Lower complexity.
+- Lower resource requirements.
+- Matches the project specification.
+- Easier to run locally.
+
+DECISION 2 — Deterministic tools
+
+Use Python functions for tool execution.
+
+Reason:
+- Reliable.
+- Testable.
+- Prevents uncontrolled LLM actions.
+
+DECISION 3 — Deterministic constraints
+
+Budget and basic constraint checks should be Python logic.
+
+Reason:
+- LLM arithmetic and rule enforcement can be unreliable.
+
+DECISION 4 — Explicit state
+
+Maintain structured state.
+
+Reason:
+- Required for replanning and memory.
+
+DECISION 5 — Local/static data
+
+Use MultiWOZ-derived local data.
+
+Reason:
+- No paid APIs.
+- Reproducible.
+- Matches project requirements.
+
+DECISION 6 — Simple orchestration
+
+Use a Python state machine or LangGraph.
+
+Reason:
+- Both represent the required sequential agent workflow.
+- Plain Python is the fastest implementation path.
+
+DECISION 7 — Streamlit
+
+Use Streamlit for the UI.
+
+Reason:
+- Minimal frontend complexity.
+- Sufficient for the project's requirements.
+
+======================================================================
+31. IMPLEMENTATION ORDER
+======================================================================
+
+Build in this exact dependency order:
+
+1. Environment
+2. Ollama + Qwen2.5-3B
+3. MultiWOZ preprocessing
+4. Local data representation
+5. Retrieval / FAISS
+6. Domain tools
+7. Pydantic schemas
+8. State management
+9. Intent extraction
+10. Task decomposition
+11. Tool invocation
+12. Candidate plan generation
+13. Constraint engine
+14. Verification
+15. Replanning
+16. Memory/preferences
+17. Streamlit UI
+18. Evaluation
+19. Documentation
+
+Do not start with UI polish.
+
+Get the complete backend planning loop working first.
+
+======================================================================
+32. MINIMUM VIABLE COMPLETE SYSTEM
+======================================================================
+
+The smallest acceptable complete implementation is:
+
+    Streamlit
+       ↓
+    Planner
+       ↓
+    Qwen2.5-3B
+       ↓
+    Structured Intent
+       ↓
+    Task Decomposition
+       ↓
+    Tool Calls
+       ↓
+    Local MultiWOZ Data
+       ↓
+    State
+       ↓
+    Constraint Checker
+       ↓
+    Schedule
+       ↓
+    Verification
+       ↓
+    Response
+
+Plus:
+
+    User changes requirement
+       ↓
+    State update
+       ↓
+    Replanning
+
+If this works reliably, the core project is complete.
+
+======================================================================
+33. ACCEPTANCE CRITERIA
+======================================================================
+
+The system passes acceptance when:
+
+[ ] User can enter a natural-language planning request.
+
+[ ] System correctly identifies the primary intent.
+
+[ ] System extracts important parameters.
+
+[ ] System decomposes complex goals into tasks.
+
+[ ] System selects appropriate tools.
+
+[ ] Tools retrieve information from local/static data.
+
+[ ] Tool results are structured.
+
+[ ] System maintains state across messages.
+
+[ ] System remembers relevant preferences.
+
+[ ] System generates a schedule.
+
+[ ] System checks budget constraints.
+
+[ ] System checks duration constraints.
+
+[ ] System checks applicable preferences.
+
+[ ] System detects unrealistic/conflicting constraints.
+
+[ ] System replans after changed requirements.
+
+[ ] System does not fabricate unavailable tool results.
+
+[ ] Final plan is verified before response.
+
+[ ] Streamlit provides a usable interface.
+
+[ ] Evaluation scenarios demonstrate all major capabilities.
+
+======================================================================
+34. FINAL ARCHITECTURAL PRINCIPLE
+======================================================================
+
+PlanWise should be engineered around one central separation:
+
+    LLM = Understand + Reason + Plan + Communicate
+
+    PYTHON = State + Tools + Rules + Validation
+
+    DATA = Grounding
+
+    FAISS = Retrieval
+
+    STREAMLIT = Interaction
+
+This separation is the most important architectural decision in the
+project.
+
+The LLM should not control the entire application.
+
+Instead:
+
+    USER
+      ↓
+    LLM — understand
+      ↓
+    PYTHON — decide/validate execution
+      ↓
+    TOOLS — retrieve
+      ↓
+    STATE — remember
+      ↓
+    PYTHON — enforce constraints
+      ↓
+    LLM — generate plan
+      ↓
+    PYTHON — verify
+      ↓
+    USER
+
+======================================================================
+35. DEFINITION OF DONE
+======================================================================
+
+PlanWise AI is DONE when the following end-to-end behavior works:
+
+    Understand
+        ↓
+    Decompose
+        ↓
+    Retrieve
+        ↓
+    Use Tools
+        ↓
+    Maintain State
+        ↓
+    Check Constraints
+        ↓
+    Generate Schedule
+        ↓
+    Verify
+        ↓
+    Respond
+
+AND:
+
+    User changes requirement
+        ↓
+    Detect change
+        ↓
+    Update state
+        ↓
+    Replan
+        ↓
+    Validate
+        ↓
+    Verify
+        ↓
+    Return updated plan
+
+The system must demonstrate the required PlanWise capabilities without
+introducing unnecessary functionality outside the project specification.
+
+======================================================================
+END OF DOCUMENT
+======================================================================

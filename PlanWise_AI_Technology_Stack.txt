@@ -1,0 +1,433 @@
+PLANWISE AI — TECHNOLOGY STACK
+
+Project:
+PlanWise AI — Agentic Personal Task and Trip Planning Assistant
+
+Technology stack selected strictly from the project PRD and system architecture,
+with priority on:
+- Fastest practical implementation
+- Simple and maintainable architecture
+- Reliable local execution
+- Low infrastructure complexity
+- Strong separation of responsibilities
+- Exact alignment with the project requirements
+
+======================================================================
+1. CORE TECHNOLOGY STACK
+======================================================================
+
+Programming Language
+- Python 3.x
+
+LLM
+- Qwen2.5-3B-Instruct
+
+LLM Runtime
+- Ollama
+
+Agent Orchestration
+- Plain Python state machine — PRIMARY / fastest option
+- LangGraph — OPTIONAL alternative
+
+User Interface
+- Streamlit
+
+Structured Data / Validation
+- Pydantic
+
+Vector Retrieval
+- FAISS
+
+Dataset / Grounding Data
+- MultiWOZ 2.2
+
+Data Storage
+- Local files / processed static datasets
+- Streamlit session state for active conversation state
+
+Testing
+- pytest
+
+Logging / Debugging
+- Python logging
+
+Version Control
+- Git
+- GitHub
+
+======================================================================
+2. TECHNOLOGY BY SYSTEM LAYER
+======================================================================
+
+PRESENTATION LAYER
+------------------
+Technology:
+- Streamlit
+
+Purpose:
+- User input
+- Chat/conversation display
+- Plan display
+- Updated plan display
+- Session interaction
+
+Do NOT put:
+- Agent logic
+- Retrieval logic
+- Constraint logic
+inside the Streamlit UI.
+
+----------------------------------------------------------------------
+APPLICATION / CONTROLLER LAYER
+----------------------------------------------------------------------
+Technology:
+- Python
+
+Purpose:
+- Request handling
+- Session coordination
+- Connecting Streamlit with the planner
+- Returning structured results to the UI
+
+----------------------------------------------------------------------
+AGENT / ORCHESTRATION LAYER
+----------------------------------------------------------------------
+Technology:
+- Python state machine
+
+Optional:
+- LangGraph
+
+Purpose:
+- Intent understanding
+- Task decomposition
+- Tool selection
+- Tool execution
+- Planning
+- Replanning
+- Verification flow
+
+Recommended choice for this project:
+- Plain Python state machine
+
+Reason:
+- Simplest implementation
+- Fastest to complete
+- Fully sufficient for the specified sequential workflow
+- Less framework overhead
+
+----------------------------------------------------------------------
+LLM LAYER
+----------------------------------------------------------------------
+Model:
+- Qwen2.5-3B-Instruct
+
+Runtime:
+- Ollama
+
+Purpose:
+- Natural-language understanding
+- Intent extraction
+- Task decomposition
+- Planning decisions
+- Schedule generation
+- Replanning
+- Final response generation
+
+Important:
+The LLM should NOT be responsible for deterministic constraint checking
+or uncontrolled tool execution.
+
+----------------------------------------------------------------------
+STATE MANAGEMENT LAYER
+----------------------------------------------------------------------
+Technology:
+- Python dataclasses and/or Pydantic models
+- Streamlit session state
+
+Purpose:
+- Location
+- Dates
+- Duration
+- Budget
+- Preferences
+- Interests
+- Chosen options
+- Current plan
+- Tool results
+- Constraints
+- Conversation state
+
+Recommended:
+- Pydantic models for important state schemas
+- st.session_state for the active application session
+
+No external database is required for the core project.
+
+----------------------------------------------------------------------
+TOOL LAYER
+----------------------------------------------------------------------
+Technology:
+- Python functions
+
+Required tools:
+- search_hotel()
+- search_restaurant()
+- search_attraction()
+- search_transport()
+
+Purpose:
+- Provide controlled access to domain data
+- Accept structured parameters
+- Return structured results
+
+Tools should be deterministic and should never fabricate results.
+
+----------------------------------------------------------------------
+RETRIEVAL LAYER
+----------------------------------------------------------------------
+Technology:
+- FAISS
+
+Supporting technology:
+- Python
+- Local embeddings
+
+Purpose:
+- Semantic search over processed local data
+- Retrieve relevant hotel, restaurant, attraction and transport records
+
+Flow:
+
+MultiWOZ 2.2
+    ↓
+Python preprocessing
+    ↓
+Processed local records
+    ↓
+Embeddings
+    ↓
+FAISS index
+    ↓
+Domain tool search
+    ↓
+Structured results
+
+----------------------------------------------------------------------
+DATA LAYER
+----------------------------------------------------------------------
+Primary dataset:
+- MultiWOZ 2.2
+
+Relevant domains:
+- Hotel
+- Restaurant
+- Attraction
+- Train
+- Taxi
+
+Storage:
+- Local JSON / JSONL / other simple processed files
+
+Purpose:
+- Ground the system in local/static information
+- Avoid paid third-party travel APIs
+- Make experiments reproducible
+
+----------------------------------------------------------------------
+CONSTRAINT / VALIDATION LAYER
+----------------------------------------------------------------------
+Technology:
+- Python
+- Pydantic
+
+Purpose:
+- Budget validation
+- Duration validation
+- Preference validation
+- Required-component validation
+- Conflict detection
+
+Example:
+
+total_cost <= budget
+
+This layer should be deterministic.
+
+----------------------------------------------------------------------
+VERIFICATION LAYER
+----------------------------------------------------------------------
+Technology:
+- Python validation logic
+- Pydantic
+
+Purpose:
+- Confirm the generated plan satisfies constraints
+- Confirm selected options came from retrieved data
+- Check schedule consistency
+- Detect unsupported or invalid output
+
+----------------------------------------------------------------------
+RESPONSE LAYER
+----------------------------------------------------------------------
+Technology:
+- Qwen2.5-3B-Instruct via Ollama
+- Python structured output handling
+
+Purpose:
+- Convert verified structured plan into a clear natural-language response
+
+----------------------------------------------------------------------
+EVALUATION / TESTING LAYER
+----------------------------------------------------------------------
+Technology:
+- pytest
+- Python
+
+Purpose:
+- Unit testing
+- Agent workflow testing
+- End-to-end testing
+- Constraint testing
+- Replanning testing
+
+======================================================================
+3. RECOMMENDED FINAL STACK
+======================================================================
+
+                PLANWISE AI
+                     |
+        +------------+------------+
+        |                         |
+    FRONTEND                  BACKEND
+        |                         |
+    Streamlit                Python 3.x
+                                  |
+                         +--------+--------+
+                         |                 |
+                     AGENT           APPLICATION
+                         |
+                 Python State Machine
+                         |
+                Qwen2.5-3B-Instruct
+                         |
+                       Ollama
+                         |
+             +-----------+-----------+
+             |                       |
+           TOOLS                 VALIDATION
+             |                       |
+      Python Functions          Pydantic/Python
+             |
+        RETRIEVAL
+             |
+            FAISS
+             |
+       Local Embeddings
+             |
+        MultiWOZ 2.2
+             |
+        Local Data Files
+
+======================================================================
+4. DEPENDENCY SUMMARY
+======================================================================
+
+Python
+  → Main programming language
+
+Streamlit
+  → User interface
+
+Qwen2.5-3B-Instruct
+  → Language understanding and planning model
+
+Ollama
+  → Local LLM serving/runtime
+
+Python State Machine
+  → Agent orchestration
+
+Pydantic
+  → Structured schemas and validation
+
+FAISS
+  → Vector similarity search
+
+MultiWOZ 2.2
+  → Dataset / local grounding source
+
+pytest
+  → Testing
+
+Python logging
+  → Debugging and execution tracing
+
+Git + GitHub
+  → Version control and project repository
+
+======================================================================
+5. WHAT SHOULD NOT BE USED
+======================================================================
+
+To keep the project aligned with the PRD and complete it quickly, do NOT
+introduce:
+
+- Multiple LLM providers
+- Multiple expensive LLMs
+- Paid travel APIs
+- Real-time booking APIs
+- PostgreSQL
+- MongoDB
+- Redis
+- Kafka
+- Kubernetes
+- Microservices
+- React/Next.js frontend
+- Separate Node.js backend
+- Complex cloud infrastructure
+- Production-grade distributed systems
+- Unnecessary agent frameworks
+
+These technologies add complexity without being required by the
+PlanWise specification.
+
+======================================================================
+6. FINAL RECOMMENDATION
+======================================================================
+
+Use this exact primary stack:
+
+Python
++
+Streamlit
++
+Qwen2.5-3B-Instruct
++
+Ollama
++
+Plain Python State Machine
++
+Pydantic
++
+FAISS
++
+Local Embeddings
++
+MultiWOZ 2.2
++
+pytest
++
+Python logging
++
+Git/GitHub
+
+Optional only if desired:
+LangGraph instead of the plain Python state machine.
+
+The primary implementation should remain local, simple, deterministic
+where possible, and focused on the required PlanWise agent workflow.
+
+======================================================================
+END
+======================================================================

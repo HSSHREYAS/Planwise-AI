@@ -1,0 +1,39 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+dist/
+build/
+*.egg
+
+# Virtual environments
+venv/
+env/
+.venv/
+.env
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# FAISS indexes (reproducible via scripts)
+backend/data/index/*.faiss
+backend/data/index/*_metadata.json
+
+# Processed data (reproducible via scripts)
+backend/data/processed/*.json
+
+# Logs
+*.log
+logs/
+
+# Temporary
+*.tmp
+scratch/
