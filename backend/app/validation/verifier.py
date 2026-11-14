@@ -10,6 +10,7 @@ Based on Architecture doc Section 3.10.
 import logging
 from typing import Set
 
+from app.money import group_cost
 from app.models.schemas import (
     ConstraintResult,
     Plan,
@@ -101,7 +102,10 @@ def verify_plan(plan: Plan, state: PlanState) -> ConstraintResult:
             for slot in day.slots:
                 for activity in slot.activities:
                     if activity.estimated_cost is not None:
-                        calculated_total += activity.estimated_cost
+                        # per-person / per-room costs scaled to the whole group
+                        calculated_total += group_cost(
+                            activity.type, activity.estimated_cost, plan.travelers
+                        )
                         has_costs = True
 
         tolerance = max(1.0, 0.02 * abs(plan.estimated_total_cost))

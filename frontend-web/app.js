@@ -28,6 +28,12 @@ let limitedMode = false;
 let activeLocation = null;
 let gpsLocation = null;
 
+/** Number of people travelling; costs and budget are split between them. */
+const TRAVELLERS_STORAGE_KEY = 'planwise_travellers';
+const MAX_TRAVELLERS = 20;
+let travellers = 1;
+let lastPlanShown = false;
+
 // --- DOM Elements ---
 const $ = id => document.getElementById(id);
 
@@ -72,6 +78,13 @@ const planStatDatesRow = $('plan-stat-dates-row');
 const planStatDates = $('plan-stat-dates');
 const planStatDuration = $('plan-stat-duration');
 const planStatCost = $('plan-stat-cost');
+const planStatTravellers = $('plan-stat-travellers');
+const planStatShareRow = $('plan-stat-share-row');
+const planStatShare = $('plan-stat-share');
+const planStatBudgetRow = $('plan-stat-budget-row');
+const planStatBudget = $('plan-stat-budget');
+const searchTravellers = $('search-travellers');
+const chipTravellers = $('chip-travellers');
 const planStatValidation = $('plan-stat-validation');
 const planWarnings = $('plan-warnings');
 const planTimelineContainer = $('plan-timeline-container');
@@ -168,14 +181,29 @@ function debounce(fn, wait) {
   };
 }
 
+/**
+ * fetch with a timeout. `options.signal` (e.g. the Stop button) can abort it too.
+ */
 async function apiFetch(path, options = {}, timeoutMs = REQUEST_TIMEOUT_MS) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
+  const external = options.signal;
+  const forwardAbort = () => controller.abort();
+  if (external) {
+    if (external.aborted) forwardAbort();
+    else external.addEventListener('abort', forwardAbort, { once: true });
+  }
   try {
     return await fetch(`${API_BASE}${path}`, { ...options, signal: controller.signal });
   } finally {
     clearTimeout(timer);
+    if (external) external.removeEventListener('abort', forwardAbort);
   }
+}
+
+function newRequestId() {
+  if (window.crypto && typeof window.crypto.randomUUID === 'function') return window.crypto.randomUUID();
+  return `r${Date.now().toString(36)}${Math.random().toString(36).slice(2, 10)}`;
 }
 
 /** Activate with Enter/Space for elements that act as buttons. */
@@ -648,6 +676,7 @@ async function resetChat() {
   itineraryEmptyState.style.display = 'block';
   itineraryContent.style.display = 'none';
   planTimelineContainer.innerHTML = '';
+  lastPlanShown = false;
   await ensureSession(true);
 }
 
@@ -676,23 +705,123 @@ function buildContext(message, overrides = {}) {
     context.start_date = overrides.dates.start;
     context.end_date = overrides.dates.end;
   }
+  // the group size always travels with the request (a number in the message wins)
+  context.travelers = travellers;
   context.explicit = explicit;
-  return Object.keys(context).length > 1 ? context : null;
+  return context;
 }
+
+/* ---------------------------------------------------------------------
+   Travellers: one value shared by the search bar and the planner chip
+   --------------------------------------------------------------------- */
+function travellersLabel(n) {
+  return n === 1 ? '1 traveller' : `${n} travellers`;
+}
+
+function setupTravellers() {
+  const options = Array.from({ length: MAX_TRAVELLERS }, (_, i) => i + 1)
+    .map(n => `<option value="${n}">${travellersLabel(n)}</option>`).join('');
+  searchTravellers.innerHTML = options;
+  chipTravellers.innerHTML = options;
+
+  try {
+    const saved = Number(localStorage.getItem(TRAVELLERS_STORAGE_KEY));
+    if (Number.isInteger(saved) && saved >= 1 && saved <= MAX_TRAVELLERS) travellers = saved;
+  } catch { /* storage blocked */ }
+  setTravellers(travellers, { persist: false });
+
+  searchTravellers.addEventListener('change', () => setTravellers(Number(searchTravellers.value)));
+  chipTravellers.addEventListener('change', () => {
+    setTravellers(Number(chipTravellers.value));
+    // an existing trip plan is re-costed for the new group straight away
+    if (lastPlanShown && !isWaitingResponse) {
+      handleUserSend(`Update the plan for ${travellersLabel(travellers)}`);
+    }
+  });
+}
+
+function setTravellers(value, { persist = true } = {}) {
+  const n = Math.min(Math.max(Math.round(Number(value) || 1), 1), MAX_TRAVELLERS);
+  travellers = n;
+  searchTravellers.value = String(n);
+  chipTravellers.value = String(n);
+  if (persist) {
+    try { localStorage.setItem(TRAVELLERS_STORAGE_KEY, String(n)); } catch { /* storage blocked */ }
+  }
+}
+
+/** " for 4 people" to append to generated queries (empty for one person). */
+function travellersPhrase() {
+  return travellers > 1 ? ` for ${travellers} people` : '';
+}
+
+/** The message currently waiting for an answer: { id, controller, sessionId, text, row, cancelled } */
+let activeRequest = null;
 
 function setBusy(busy) {
   isWaitingResponse = busy;
-  btnChatSend.disabled = busy;
   chatInput.disabled = busy;
   btnCapsuleSearch.disabled = busy;
+  // while waiting, the send button becomes a Stop button
+  btnChatSend.disabled = false;
+  btnChatSend.classList.toggle('is-stop', busy);
+  btnChatSend.textContent = busy ? '■' : '➤';
+  btnChatSend.title = busy ? 'Stop generating (Esc)' : 'Send message';
+  btnChatSend.setAttribute('aria-label', busy ? 'Stop generating' : 'Send message');
+  document.querySelectorAll('.msg-edit-btn').forEach(btn => {
+    // only the in-flight message can be edited while busy (that also stops it)
+    btn.disabled = busy && btn.closest('.message-row') !== (activeRequest && activeRequest.row);
+  });
 }
 
-async function postMessage(sessionId, body) {
+async function postMessage(sessionId, body, signal) {
   return apiFetch(`/sessions/${sessionId}/messages`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
+    signal,
   });
+}
+
+/**
+ * Stop the message that is being answered. The backend discards its result,
+ * so the conversation and plan stay exactly as they were before it, and the
+ * text goes back into the input box for rewriting.
+ */
+function stopActiveRequest() {
+  const req = activeRequest;
+  if (!req || req.cancelled) return;
+  req.cancelled = true;
+  req.controller.abort();
+  if (req.sessionId) {
+    apiFetch(`/sessions/${req.sessionId}/messages/${encodeURIComponent(req.id)}/cancel`,
+      { method: 'POST' }, 10000).catch(() => { /* best effort */ });
+  }
+}
+
+/** Put a message's text back into the input so it can be rewritten. */
+function loadIntoInput(text) {
+  chatInput.disabled = false;
+  chatInput.value = text;
+  chatInput.focus({ preventScroll: true });
+  chatInput.setSelectionRange(text.length, text.length);
+}
+
+function editMessage(row) {
+  const text = row.dataset.text || '';
+  if (activeRequest && activeRequest.row === row && !activeRequest.cancelled) {
+    stopActiveRequest();          // the cancel handler refills the input
+    return;
+  }
+  if (isWaitingResponse) return;
+  loadIntoInput(text);
+}
+
+function markCancelled(row) {
+  if (!row) return;
+  row.classList.add('is-cancelled');
+  const note = row.querySelector('.msg-status');
+  if (note) note.textContent = 'Stopped';
 }
 
 /**
@@ -710,29 +839,39 @@ async function handleUserSend(text, options = {}) {
   }
 
   chatInput.value = '';
+  const userRow = appendMessage('user', query);
+  const req = {
+    id: newRequestId(), controller: new AbortController(),
+    sessionId: null, text: query, row: userRow, cancelled: false,
+  };
+  activeRequest = req;
   setBusy(true);
-  appendMessage('user', query);
   const spinnerId = appendThinkingIndicator();
 
   try {
     let sessionId = await ensureSession();
     if (!sessionId) throw new Error('backend unreachable');
+    req.sessionId = sessionId;
+    if (req.cancelled) throw new DOMException('Stopped', 'AbortError');
 
-    const body = { message: query };
+    const body = { message: query, request_id: req.id };
     const context = buildContext(query, options);
     if (context) body.context = context;
 
-    let res = await postMessage(sessionId, body);
+    let res = await postMessage(sessionId, body, req.controller.signal);
     if (res.status === 404) {
       // the backend restarted and forgot the session: start a new one, retry once
       sessionId = await ensureSession(true);
       if (!sessionId) throw new Error('backend unreachable');
-      res = await postMessage(sessionId, body);
+      req.sessionId = sessionId;
+      res = await postMessage(sessionId, body, req.controller.signal);
     }
     if (!res.ok) throw new Error(`server returned status ${res.status}`);
 
     const data = await res.json();
+    if (req.cancelled || data.status === 'cancelled') throw new DOMException('Stopped', 'AbortError');
     removeThinkingIndicator(spinnerId);
+    if (userRow.querySelector('.msg-status')) userRow.querySelector('.msg-status').textContent = '';
     appendAssistantMessage(data.message || 'I have processed your request.', data);
 
     if (data.plan) renderItineraryDrawer(data.plan, data.validation, data.context || {});
@@ -742,22 +881,37 @@ async function handleUserSend(text, options = {}) {
     }
   } catch (err) {
     removeThinkingIndicator(spinnerId);
+    if (req.cancelled) {
+      // Stopped by the user: nothing was changed, let them rewrite it
+      markCancelled(userRow);
+      activeRequest = null;
+      setBusy(false);
+      loadIntoInput(query);
+      return;
+    }
     const timedOut = err.name === 'AbortError';
     appendMessage(
       'assistant',
       timedOut
         ? '⚠️ That took too long and was cancelled. Please try again — the free AI and map services are sometimes slow.'
-        : `⚠️ Could not reach the PlanWise AI server (${err.message}). Please check that the backend is running on port 8000.`,
+        : `⚠️ Could not reach the PlanWise AI server (${err.message}). Please check that the backend is running.`,
     );
     checkBackendHealth();
   } finally {
-    setBusy(false);
-    chatInput.focus({ preventScroll: true });
+    if (activeRequest === req) {
+      activeRequest = null;
+      setBusy(false);
+      chatInput.focus({ preventScroll: true });
+    }
   }
 }
 
 /** Keep the location chip in step with what the agent actually used. */
 function syncContextFromResponse(context) {
+  if (context && Number.isInteger(context.travelers) && context.travelers !== travellers
+      && context.travelers <= MAX_TRAVELLERS) {
+    setTravellers(context.travelers);    // e.g. the user typed "we are 4 people"
+  }
   if (!context || !context.location || context.lat === null || context.lat === undefined) return;
   const same = activeLocation
     && Math.abs(activeLocation.lat - context.lat) < 0.01
@@ -796,8 +950,27 @@ function createMessageRow(role) {
 function appendMessage(role, content) {
   const { row, bubble } = createMessageRow(role);
   bubble.innerHTML = formatMarkdown(content);
+
+  if (role === 'user') {
+    // bubble + a small action bar (Edit) underneath it
+    row.dataset.text = content;
+    const stack = document.createElement('div');
+    stack.className = 'message-stack';
+    row.replaceChild(stack, bubble);
+    stack.appendChild(bubble);
+
+    const actions = document.createElement('div');
+    actions.className = 'message-actions';
+    actions.innerHTML = `
+      <span class="msg-status"></span>
+      <button type="button" class="msg-edit-btn" title="Copy this message into the box to rewrite it">✏️ Edit</button>`;
+    actions.querySelector('.msg-edit-btn').addEventListener('click', () => editMessage(row));
+    stack.appendChild(actions);
+  }
+
   chatMessages.appendChild(row);
   scrollChatToBottom();
+  return row;
 }
 
 function appendThinkingIndicator() {
@@ -998,12 +1171,37 @@ function renderItineraryDrawer(plan, validation, context) {
   const dayCount = plan.duration_days || (plan.days ? plan.days.length : 1);
   planStatDuration.textContent = `${dayCount} day${dayCount === 1 ? '' : 's'}`;
 
-  if (plan.estimated_total_cost !== undefined && plan.estimated_total_cost !== null) {
-    let cost = formatMoney(plan.estimated_total_cost, currency);
-    if (context.budget) cost += ` / ${formatMoney(context.budget, currency)}`;
-    planStatCost.textContent = cost;
+  const groupSize = plan.travelers || 1;
+  const isStudy = plan.plan_type === 'study';
+  lastPlanShown = !isStudy;
+  planStatTravellers.textContent = plan.rooms && groupSize > 1
+    ? `${groupSize} (${plan.rooms} room${plan.rooms === 1 ? '' : 's'})`
+    : String(groupSize);
+  planStatTravellers.parentElement.style.display = isStudy ? 'none' : '';
+
+  const hasTotal = plan.estimated_total_cost !== undefined && plan.estimated_total_cost !== null;
+  if (hasTotal) {
+    planStatCost.textContent = groupSize > 1
+      ? `${formatMoney(plan.estimated_total_cost, currency)} total`
+      : formatMoney(plan.estimated_total_cost, currency);
   } else {
-    planStatCost.textContent = plan.plan_type === 'study' ? 'Free' : 'Not estimated';
+    planStatCost.textContent = isStudy ? 'Free' : 'Not estimated';
+  }
+
+  // Each person's even share of the group cost
+  planStatShareRow.style.display = hasTotal && groupSize > 1 ? '' : 'none';
+  if (hasTotal && groupSize > 1) {
+    planStatShare.textContent = formatMoney(plan.cost_per_person, currency);
+  }
+
+  // Budget is for the whole group: show it with each person's share
+  planStatBudgetRow.style.display = context.budget ? '' : 'none';
+  if (context.budget) {
+    const over = hasTotal && plan.estimated_total_cost > context.budget;
+    planStatBudget.textContent = groupSize > 1
+      ? `${formatMoney(context.budget, currency)} (${formatMoney(context.budget / groupSize, currency)} each)`
+      : formatMoney(context.budget, currency);
+    planStatBudget.style.color = over ? 'var(--warning)' : 'var(--text-primary)';
   }
 
   const invalid = validation && validation.valid === false;
@@ -1034,8 +1232,11 @@ function renderItineraryDrawer(plan, validation, context) {
 
       const actsHtml = activities.map(a => {
         const details = a.details || {};
-        const cost = a.estimated_cost ? formatMoney(a.estimated_cost, currency)
+        let cost = a.estimated_cost ? formatMoney(a.estimated_cost, currency)
           : (a.estimated_cost === 0 && a.type === 'attraction' ? 'Free' : '');
+        if (a.estimated_cost && groupSize > 1) {
+          cost += a.type === 'hotel' ? '/room' : ' pp';     // per room / per person
+        }
         const suggested = details.source === 'ai_suggested';
         const mapUrl = safeUrl(details.map_url);
         return `
@@ -1125,7 +1326,7 @@ function renderDestinations() {
 
       const message = dates
         ? `Plan a trip to ${dest.name} ${describeDates(dates)}`
-        : `Plan a 2-day trip to ${dest.name}`;
+        : `Plan a 2-day trip to ${dest.name}${travellersPhrase()}`;
       switchView('planner');
       handleUserSend(message, { explicit: Boolean(place), dates });
     });
@@ -1161,10 +1362,10 @@ async function runCapsuleSearch() {
   let query;
   switch (searchExperience.value) {
     case 'hotels':
-      query = `Find ${styleWord ? styleWord + ' ' : ''}hotels in ${where}${dates ? ` for a stay${dateText}` : ''}`;
+      query = `Find ${styleWord ? styleWord + ' ' : ''}hotels in ${where}${travellersPhrase()}${dates ? ` for a stay${dateText}` : ''}`;
       break;
     case 'restaurants':
-      query = `Find ${styleWord ? styleWord + ' ' : ''}restaurants in ${where}`;
+      query = `Find ${styleWord ? styleWord + ' ' : ''}restaurants in ${where}${travellersPhrase()}`;
       break;
     case 'attractions':
       query = `What are the best ${style === 'cheap' ? 'free or low-cost ' : ''}attractions to visit in ${where}?`;
@@ -1174,8 +1375,8 @@ async function runCapsuleSearch() {
       break;
     default:
       query = dates
-        ? `Plan a ${dates.days}-day ${styleWord ? styleWord + ' ' : ''}trip to ${where}${dateText}`
-        : `Plan a 2-day ${styleWord ? styleWord + ' ' : ''}trip to ${where}`;
+        ? `Plan a ${dates.days}-day ${styleWord ? styleWord + ' ' : ''}trip to ${where}${travellersPhrase()}${dateText}`
+        : `Plan a 2-day ${styleWord ? styleWord + ' ' : ''}trip to ${where}${travellersPhrase()}`;
   }
 
   switchView('planner');
@@ -1221,7 +1422,16 @@ function setupPromptCardsAndCapsule() {
   });
 
   // Chat input
-  btnChatSend.addEventListener('click', () => handleUserSend());
+  btnChatSend.addEventListener('click', () => {
+    if (isWaitingResponse) stopActiveRequest();
+    else handleUserSend();
+  });
+  document.addEventListener('keydown', e => {
+    // Esc stops a message that is being answered (unless a popover is open)
+    if (e.key === 'Escape' && activeRequest && !locationPopover.classList.contains('is-open')) {
+      stopActiveRequest();
+    }
+  });
   chatInput.addEventListener('keydown', e => {
     if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) {
       e.preventDefault();
@@ -1239,6 +1449,7 @@ document.addEventListener('DOMContentLoaded', () => {
   setupNavigation();
   setupLocationControls();
   setupDateInputs();
+  setupTravellers();
   renderDestinations();
   setupPromptCardsAndCapsule();
   renderLocation();

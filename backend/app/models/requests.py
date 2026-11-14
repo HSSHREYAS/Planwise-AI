@@ -49,6 +49,7 @@ class MessageContext(BaseModel):
     lon: Optional[float] = Field(default=None, ge=-180, le=180)
     start_date: Optional[str] = None
     end_date: Optional[str] = None
+    travelers: Optional[int] = Field(default=None, ge=1, le=50, description="Number of people travelling")
     explicit: bool = Field(
         default=False,
         description="True when the user picked these values for this very request "
@@ -60,6 +61,10 @@ class MessageRequest(BaseModel):
     """Request to send a message to the planning agent."""
     message: str = Field(min_length=1, max_length=2000, description="User's natural language message")
     context: Optional[MessageContext] = None
+    request_id: Optional[str] = Field(
+        default=None, max_length=64, pattern=r"^[A-Za-z0-9_-]+$",
+        description="Client-chosen id so the request can be cancelled (Stop button)",
+    )
 
 
 # ── Replan ──────────────────────────────────────────────────────

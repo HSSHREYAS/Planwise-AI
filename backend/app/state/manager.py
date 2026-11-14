@@ -185,6 +185,9 @@ class StateManager:
                 setattr(state, key, normalize_iso_date(value) or getattr(state, key))
             elif key == "currency" and isinstance(value, str) and len(value.strip()) == 3:
                 state.currency = value.strip().upper()
+            elif key in ("travelers", "travellers", "people") and str(value).strip().isdigit():
+                logger.info(f"Replan: travellers {state.travelers} → {value}")
+                state.travelers = max(1, min(int(value), 50))
             else:
                 logger.warning(f"Unknown change key: {key}={value}")
 
@@ -204,8 +207,11 @@ class StateManager:
             parts.append(dates)
         if state.duration_days is not None:
             parts.append(f"Duration: {state.duration_days} day(s)")
+        if (state.travelers or 1) > 1:
+            parts.append(f"Travellers: {state.travelers} people")
         if state.budget is not None:
-            parts.append(f"Budget: {state.budget:g} {state.currency or ''}".rstrip())
+            scope = " (whole group)" if (state.travelers or 1) > 1 else ""
+            parts.append(f"Budget: {state.budget:g} {state.currency or ''}".rstrip() + scope)
         elif state.currency:
             parts.append(f"Currency for costs: {state.currency}")
         if state.preferences:

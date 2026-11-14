@@ -176,8 +176,24 @@ def send_message(session_id: str, request: MessageRequest):
 
     context = request.context.model_dump() if request.context else None
     logger.info(f"Message received for session {session_id}: '{message[:80]}'")
-    response = session_service.handle_message(session_id, message, context)
+    response = session_service.handle_message(session_id, message, context, request.request_id)
     return response.model_dump()
+
+
+@router.post("/sessions/{session_id}/messages/{request_id}/cancel", status_code=202)
+def cancel_message(session_id: str, request_id: str):
+    """
+    POST /api/v1/sessions/{session_id}/messages/{request_id}/cancel
+
+    Stop button: the message's result is discarded and the session stays as
+    it was before that message.
+    """
+    if not session_service.session_exists(session_id):
+        raise HTTPException(status_code=404, detail="Session not found")
+    if len(request_id) > 64:
+        raise HTTPException(status_code=422, detail="Invalid request id")
+    session_service.cancel(session_id, request_id)
+    return {"status": "cancelled", "request_id": request_id}
 
 
 # ── Plan ────────────────────────────────────────────────────────

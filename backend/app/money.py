@@ -104,6 +104,43 @@ def estimate_hotel_cost(pricerange: Optional[str], currency: Optional[str]) -> f
     return _scale(_HOTEL_USD.get((pricerange or "moderate").lower(), _HOTEL_USD["moderate"]), currency)
 
 
+# ── Group cost sharing ──────────────────────────────────────────
+#
+# Activity costs in a plan are stored PER PERSON, except hotels, which are
+# stored PER ROOM PER NIGHT (two travellers share a room). These helpers
+# turn them into what the whole group pays and what each person pays.
+
+MAX_TRAVELERS = 50
+
+
+def clamp_travelers(value) -> int:
+    try:
+        return max(1, min(int(value), MAX_TRAVELERS))
+    except (TypeError, ValueError):
+        return 1
+
+
+def rooms_needed(travelers: int) -> int:
+    """Hotel rooms for a group, assuming two people per room."""
+    return max(1, -(-clamp_travelers(travelers) // 2))
+
+
+def group_cost(activity_type: Optional[str], cost: Optional[float], travelers: int) -> float:
+    """What the whole group pays for one activity."""
+    if not cost:
+        return 0.0
+    if (activity_type or "").lower() == "hotel":
+        return float(cost) * rooms_needed(travelers)
+    return float(cost) * clamp_travelers(travelers)
+
+
+def split_evenly(total: Optional[float], travelers: int) -> Optional[float]:
+    """Each person's share of a group amount."""
+    if total is None:
+        return None
+    return round(float(total) / clamp_travelers(travelers), 2)
+
+
 def tight_daily_budget(currency: Optional[str]) -> float:
     """Below this per-day amount a complete plan is unrealistic."""
     if not currency:

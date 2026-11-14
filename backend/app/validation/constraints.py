@@ -117,13 +117,16 @@ def check_impossible_constraints(state: PlanState) -> List[str]:
     warnings = []
 
     if state.budget is not None and state.duration_days is not None:
-        # Very rough heuristic: < 500 per day is extremely tight
-        per_day = state.budget / max(state.duration_days, 1)
+        # Very rough heuristic on what each person has to spend per day
+        travelers = max(int(state.travelers or 1), 1)
+        per_day = state.budget / travelers / max(state.duration_days, 1)
         if per_day < tight_daily_budget(state.currency):
+            group = f" for {travelers} people" if travelers > 1 else ""
+            unit = "/person/day" if travelers > 1 else "/day"
             warnings.append(
-                f"Budget of {format_money(state.budget, state.currency)} for "
+                f"Budget of {format_money(state.budget, state.currency)}{group} for "
                 f"{state.duration_days} day(s) "
-                f"({format_money(per_day, state.currency)}/day) is very tight and "
+                f"({format_money(per_day, state.currency)}{unit}) is very tight and "
                 f"may not allow for a complete plan"
             )
 

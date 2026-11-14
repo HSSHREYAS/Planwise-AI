@@ -407,3 +407,174 @@ class TestApi:
 
         data = client.post(f"{url}/replan", json={"changes": {"duration_days": 1}}).json()
         assert data["status"] == "completed" and len(data["plan"]["days"]) == 1
+
+
+class TestGroupTravel:
+    """Number of travellers: parsing, cost splitting and budget checks."""
+
+    # two_day_plan(): per-person costs 200+300+400+300+350+0+150 = 1700,
+    # plus one hotel night at 2000 per room.
+    PER_PERSON_ACTIVITIES = 1700
+    HOTEL_PER_ROOM = 2000
+
+    @pytest.mark.parametrize("message,travelers", [
+        ("Plan a trip to Goa for 4 people", 4),
+        ("we are 3 friends going to Jaipur", 3),
+        ("trip for six people to Paris", 6),
+        ("a family of 5 visiting Mysuru", 5),
+        ("we are 3 going to Jaipur", 3),
+        ("hotels in Paris for 2 adults", 2),
+        ("honeymoon in Bali", 2),
+        ("a solo trip to Tokyo", 1),
+        ("Plan a 3 day trip to Goa", None),
+        ("we are 3 days in Goa", None),
+    ])
+    def test_travelers_parsing(self, message, travelers):
+        assert agent_with()._fallback_intent(message, PlanState()).travelers == travelers
+
+    def test_group_size_does_not_become_a_budget(self):
+        res = agent_with()._fallback_intent("Plan a trip to Goa under 4 people", PlanState())
+        assert res.budget is None
+
+    def test_costs_are_split_and_rooms_shared(self):
+        state = PlanState()
+        res = agent_with(two_day_plan()).handle_message(
+            "Plan a 2 day trip to Jaipur for 4 people with a budget of 20000 rupees", state)
+        assert res.status == ResponseStatus.COMPLETED
+        plan = res.plan
+        expected_total = self.PER_PERSON_ACTIVITIES * 4 + self.HOTEL_PER_ROOM * 2
+        assert plan.travelers == 4 and plan.rooms == 2
+        assert plan.estimated_total_cost == expected_total
+        assert plan.cost_per_person == expected_total / 4
+        assert res.context["travelers"] == 4 and res.context["budget_per_person"] == 5000
+        assert "4 travellers" in res.message and "per person" in res.message
+        assert "2 rooms" in res.message
+
+    def test_per_person_budget_is_multiplied_out(self):
+        state = PlanState()
+        res = agent_with(two_day_plan()).handle_message(
+            "Plan a 2 day trip to Jaipur for 4 people, budget 5000 rupees each", state)
+        assert state.budget == 20000 and res.status == ResponseStatus.COMPLETED
+
+    def test_group_budget_is_checked_against_group_total(self):
+        # group total 10800 > 9000: the most expensive item (hotel, 4000) is dropped
+        res = agent_with(two_day_plan()).handle_message(
+            "Plan a 2 day trip to Jaipur for 4 people with a budget of 9000 rupees", PlanState())
+        assert res.status == ResponseStatus.COMPLETED
+        assert res.plan.estimated_total_cost <= 9000
+        names = [a.name for d in res.plan.days for s in d.slots for a in s.activities]
+        assert "Hotel Kalyan" not in names
+
+    def test_ui_selector_sets_group_size(self):
+        res = agent_with(two_day_plan()).handle_message(
+            "Plan a 2 day trip to Jaipur", PlanState(), {"travelers": 3})
+        assert res.plan.travelers == 3 and res.plan.rooms == 2
+        assert res.plan.estimated_total_cost == self.PER_PERSON_ACTIVITIES * 3 + self.HOTEL_PER_ROOM * 2
+
+    def test_message_beats_ui_selector(self):
+        res = agent_with(two_day_plan()).handle_message(
+            "Plan a 2 day trip to Jaipur for 2 people", PlanState(), {"travelers": 5})
+        assert res.plan.travelers == 2
+
+    def test_solo_trip_shows_plain_total(self):
+        res = agent_with(two_day_plan()).handle_message("Plan a 2 day trip to Jaipur", PlanState())
+        assert res.plan.travelers == 1 and res.plan.rooms == 1
+        assert res.plan.cost_per_person == res.plan.estimated_total_cost
+        assert "travellers" not in res.message
+
+    def test_changing_group_size_updates_existing_plan(self):
+        state = PlanState()
+        agent = agent_with(two_day_plan())
+        first = agent.handle_message("Plan a 2 day trip to Jaipur", state)
+        solo_total = first.plan.estimated_total_cost
+
+        res = agent.handle_message("we are 4 people now", state)
+        assert res.status == ResponseStatus.COMPLETED and res.plan is not None
+        assert state.travelers == 4 and res.plan.travelers == 4
+        assert res.plan.estimated_total_cost > solo_total
+        assert len(res.plan.days) == 2
+
+    def test_replan_api_changes_travelers(self):
+        state = PlanState()
+        agent = agent_with(two_day_plan())
+        agent.handle_message("Plan a 2 day trip to Jaipur", state)
+        res = agent.replan_with_changes(state, {"travelers": 3})
+        assert res.status == ResponseStatus.COMPLETED and res.plan.travelers == 3
+
+    def test_tight_budget_warning_is_per_person(self):
+        from app.validation.constraints import check_impossible_constraints
+        assert check_impossible_constraints(PlanState(budget=1000, duration_days=2, travelers=1)) == []
+        warnings = check_impossible_constraints(PlanState(budget=1000, duration_days=2, travelers=4))
+        assert warnings and "4 people" in warnings[0] and "/person/day" in warnings[0]
+
+    def test_context_validation(self):
+        from app.models.requests import MessageContext
+        from pydantic import ValidationError
+        assert MessageContext(travelers=4).travelers == 4
+        for bad in (0, 51):
+            with pytest.raises(ValidationError):
+                MessageContext(travelers=bad)
+
+
+class TestCancellation:
+    """Stop button: a cancelled message leaves the session untouched."""
+
+    class RecordingAgent:
+        def __init__(self, service=None, cancel_id=None):
+            self.service = service
+            self.cancel_id = cancel_id
+
+        def handle_message(self, message, state, context=None):
+            if self.service and self.cancel_id:
+                self.service.cancel(state.session_id, self.cancel_id)   # user pressed Stop mid-way
+            state.goal = message
+            state.travelers = 7
+            from app.models.schemas import AgentResponse
+            return AgentResponse(session_id=state.session_id, status=ResponseStatus.COMPLETED, message="done")
+
+    def _service(self):
+        from app.services.session_service import SessionService
+        service = SessionService.__new__(SessionService)
+        SessionService.__init__(service)
+        return service
+
+    def test_completed_request_is_committed(self):
+        service = self._service()
+        service._agent = self.RecordingAgent()
+        sid = service.create_session()
+        res = service.handle_message(sid, "plan a trip", request_id="r1")
+        assert res.status == ResponseStatus.COMPLETED
+        assert service.get_session(sid).goal == "plan a trip"
+
+    def test_cancelled_request_is_discarded(self):
+        service = self._service()
+        sid = service.create_session()
+        service._agent = self.RecordingAgent(service, "r2")
+        res = service.handle_message(sid, "cancel me", request_id="r2")
+        assert res.status == ResponseStatus.CANCELLED
+        state = service.get_session(sid)
+        assert state.goal is None and state.travelers == 1
+
+        # the next (rewritten) message works normally
+        service._agent = self.RecordingAgent()
+        assert service.handle_message(sid, "rewritten", request_id="r3").status == ResponseStatus.COMPLETED
+        assert service.get_session(sid).goal == "rewritten"
+
+    def test_cancel_before_start_skips_the_work(self):
+        service = self._service()
+        sid = service.create_session()
+        service.cancel(sid, "r4")
+        service._agent = self.RecordingAgent()
+        assert service.handle_message(sid, "x", request_id="r4").status == ResponseStatus.CANCELLED
+        assert service.get_session(sid).goal is None
+
+    def test_cancel_endpoint(self, monkeypatch):
+        from app.main import app
+        with TestClient(app) as client:
+            sid = client.post("/api/v1/sessions", json={}).json()["session_id"]
+            ok = client.post(f"/api/v1/sessions/{sid}/messages/abc-123/cancel")
+            assert ok.status_code == 202 and ok.json()["status"] == "cancelled"
+            assert client.post("/api/v1/sessions/nope/messages/abc/cancel").status_code == 404
+            bad = client.post(f"/api/v1/sessions/{sid}/messages",
+                              json={"message": "hi", "request_id": "bad id!"})
+            assert bad.status_code == 422

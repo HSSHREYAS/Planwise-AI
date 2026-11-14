@@ -1966,3 +1966,149 @@ button {
     display: none;
   }
 }
+
+/* --- Travellers (group size) ----------------------------------------- */
+.search-field-travellers {
+  flex: 0 0 140px;
+}
+
+.travellers-chip {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 6px 4px 10px;
+  border-radius: var(--radius-pill);
+  border: 1px solid var(--border-strong);
+  background: var(--bg-surface);
+  font-size: 0.82rem;
+  cursor: pointer;
+  transition: var(--transition);
+}
+
+.travellers-chip:hover,
+.travellers-chip:focus-within {
+  border-color: var(--primary);
+}
+
+.travellers-chip select {
+  border: none;
+  background: transparent;
+  color: var(--text-primary);
+  font-family: inherit;
+  font-size: 0.82rem;
+  font-weight: 600;
+  outline: none;
+  cursor: pointer;
+}
+
+.travellers-chip select option {
+  background: var(--bg-surface);
+  color: var(--text-primary);
+}
+
+@media (max-width: 1024px) {
+  .search-field-travellers {
+    flex: 1 1 40%;
+  }
+}
+
+@media (max-width: 768px) {
+  .search-field-travellers {
+    flex: 0 0 auto;
+    width: 100%;
+  }
+}
+
+/* Six fields in the capsule: keep the fixed-width ones compact on desktop */
+@media (min-width: 1025px) {
+  .search-field {
+    padding: 10px 12px;
+  }
+
+  .search-field-date {
+    flex: 0 0 150px;
+  }
+
+  .search-field-travellers {
+    flex: 0 0 122px;
+  }
+}
+
+/* --- Stop / Edit for chat messages ------------------------------------ */
+.chat-send-btn.is-stop {
+  background: var(--text-primary);
+  color: var(--bg-page);
+  font-size: 0.95rem;
+  box-shadow: none;
+  animation: stop-pulse 1.6s ease-in-out infinite;
+}
+
+@keyframes stop-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 var(--primary-glow); }
+  50% { box-shadow: 0 0 0 6px var(--primary-glow); }
+}
+
+.message-stack {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  min-width: 0;
+}
+
+.message-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 4px;
+  min-height: 22px;
+  font-size: 0.76rem;
+  color: var(--text-muted);
+}
+
+.msg-edit-btn {
+  background: transparent;
+  border: none;
+  color: var(--text-muted);
+  font-size: 0.76rem;
+  font-weight: 600;
+  padding: 2px 6px;
+  border-radius: var(--radius-xs);
+  cursor: pointer;
+  opacity: 0;
+  transition: var(--transition);
+}
+
+.message-row.user:hover .msg-edit-btn,
+.message-row.user:focus-within .msg-edit-btn,
+.message-row.is-cancelled .msg-edit-btn,
+.msg-edit-btn:focus-visible {
+  opacity: 1;
+}
+
+.msg-edit-btn:hover:not(:disabled) {
+  color: var(--primary);
+  background: var(--verified-bg);
+}
+
+.msg-edit-btn:disabled {
+  cursor: not-allowed;
+  opacity: 0;
+}
+
+.message-row.is-cancelled .message-bubble {
+  opacity: 0.55;
+  text-decoration: line-through;
+  text-decoration-thickness: 1px;
+}
+
+.message-row.is-cancelled .msg-status {
+  color: var(--warning);
+  font-weight: 600;
+}
+
+/* touch screens have no hover: keep Edit visible */
+@media (hover: none) {
+  .msg-edit-btn {
+    opacity: 1;
+  }
+}

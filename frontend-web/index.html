@@ -89,6 +89,11 @@
             <input type="date" id="search-end" aria-label="End date" />
           </div>
 
+          <div class="search-field search-field-travellers">
+            <label for="search-travellers">Travellers</label>
+            <select id="search-travellers" class="travellers-select" aria-label="Number of travellers"></select>
+          </div>
+
           <div class="search-field">
             <label for="search-experience">What to Plan</label>
             <select id="search-experience">
@@ -314,6 +319,10 @@
                 <button type="button" class="btn-secondary popover-locate" id="btn-chip-locate">📍 Use my current location</button>
               </div>
             </div>
+            <label class="travellers-chip" title="Number of travellers - costs and budget are split between them">
+              <span aria-hidden="true">👥</span>
+              <select id="chip-travellers" class="travellers-select" aria-label="Number of travellers"></select>
+            </label>
             <button class="btn-secondary" id="btn-new-chat" style="padding:6px 14px; font-size:0.82rem;">
               ✨ New Chat
             </button>
@@ -383,8 +392,20 @@
             <span id="plan-stat-duration" style="color:var(--text-primary);">-</span>
           </div>
           <div class="itinerary-stat-pill">
+            <span>👥 Travellers:</span>
+            <span id="plan-stat-travellers" style="color:var(--text-primary);">1</span>
+          </div>
+          <div class="itinerary-stat-pill">
             <span>💰 Est. Cost:</span>
             <span id="plan-stat-cost" style="color:var(--success);">-</span>
+          </div>
+          <div class="itinerary-stat-pill" id="plan-stat-share-row" style="display:none;">
+            <span>🧾 Per Person:</span>
+            <span id="plan-stat-share" style="color:var(--text-primary);">-</span>
+          </div>
+          <div class="itinerary-stat-pill" id="plan-stat-budget-row" style="display:none;">
+            <span>🎯 Budget:</span>
+            <span id="plan-stat-budget" style="color:var(--text-primary);">-</span>
           </div>
           <div class="itinerary-stat-pill">
             <span>🛡️ Constraints:</span>

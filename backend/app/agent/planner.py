@@ -123,6 +123,7 @@ class PlanningAgent:
 
             previous_intent = state.intent
             previous_place = dict(state.place) if state.place else None
+            previous_travelers = state.travelers
             had_plan = state.current_plan is not None
 
             is_modification = bool(intent.is_modification and had_plan)
@@ -132,6 +133,17 @@ class PlanningAgent:
                     intent.intent = "trip_planning"
 
             state = self.state_manager.update_from_intent(state, intent)
+            self._resolve_travelers(state, intent, context)
+
+            # "we are 4 people now" on an existing trip plan = change that plan
+            if (
+                had_plan
+                and state.travelers != previous_travelers
+                and previous_intent == "trip_planning"
+                and not intent.location
+                and intent.intent in ("general_query", "trip_planning", "replanning")
+            ):
+                is_modification = True
             if is_modification and previous_intent in PLANNING_INTENTS:
                 # A change request keeps the kind of plan being worked on
                 state.intent = previous_intent
@@ -287,7 +299,7 @@ class PlanningAgent:
         budget_match = re.search(
             r"(?:[₹$£€]\s*|(?:budget|cost|spend|price|under|max|within|below)\s*"
             r"(?:of|is|to|around|about)?\s*(?:rs\.?|inr|usd|gbp|eur)?\s*[₹$£€]?\s*)(\d[\d,]*(?:\.\d+)?)(?![\d,.:])"
-            r"\s*(k\b)?(?!\s*[- ]?(?:days?|nights?|hours?|hrs?|km|stars?|people|persons?|pm|am)\b)",
+            r"\s*(k\b)?(?!\s*[- ]?(?:days?|nights?|hours?|hrs?|km|stars?|people|persons?|travell?ers?|adults|pax|guests|friends|members|pm|am)\b)",
             message,
             re.IGNORECASE,
         )
@@ -359,6 +371,12 @@ class PlanningAgent:
             if re.search(rf"\b{word}s?\b", msg_lower):
                 interests.append(word)
 
+        travelers = self._extract_travelers(msg_lower)
+        budget_per_person = budget is not None and bool(re.search(
+            r"\b(per\s+person|per\s+head|a\s+head|each|apiece|per\s+traveller|per\s+traveler|pp)\b"
+            r"|/\s*(person|head)", msg_lower,
+        ))
+
         raw_changes: Dict[str, Any] = {}
         if is_mod:
             if budget is not None:
@@ -367,6 +385,8 @@ class PlanningAgent:
                 raw_changes["duration_days"] = duration
 
         return IntentResult(
+            travelers=travelers,
+            budget_per_person=budget_per_person,
             intent=intent,
             location=location,
             budget=budget,
@@ -379,6 +399,36 @@ class PlanningAgent:
             is_modification=is_mod,
             raw_changes=raw_changes or None,
         )
+
+    @staticmethod
+    def _extract_travelers(msg_lower: str) -> Optional[int]:
+        """Group size mentioned in a message ("for 4 people", "family of 5", "solo")."""
+        number_words = {
+            "one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6, "seven": 7,
+            "eight": 8, "nine": 9, "ten": 10, "eleven": 11, "twelve": 12,
+        }
+        num = r"(\d{1,2}|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve)"
+        people = r"(?:people|persons?|travell?ers?|adults|pax|guests|members|friends|of\s+us|folks|heads)"
+        patterns = [
+            rf"\b{num}\s+{people}\b",
+            rf"\b(?:group|family|party|team|gang)\s+of\s+{num}\b",
+            rf"\bwe\s+are\s+(?:a\s+group\s+of\s+)?{num}\b(?!\s*(?:days?|nights?))",
+            rf"\b(?:for|with)\s+{num}\s+(?:of\s+us|in\s+total|altogether)\b",
+        ]
+        for pattern in patterns:
+            match = re.search(pattern, msg_lower)
+            if match:
+                raw = match.group(1)
+                value = number_words.get(raw) or (int(raw) if raw.isdigit() else None)
+                if value:
+                    return money.clamp_travelers(value)
+
+        if re.search(r"\b(solo|alone|by myself|just me|on my own)\b", msg_lower):
+            return 1
+        if re.search(r"\b(couple|honeymoon|with my (wife|husband|partner|girlfriend|boyfriend|spouse))\b",
+                     msg_lower):
+            return 2
+        return None
 
     def _extract_location(self, message: str) -> Optional[str]:
         """Find a place name in free text without an LLM."""
@@ -560,6 +610,22 @@ class PlanningAgent:
 
         if state.start_date and state.end_date:
             state.dates = f"{state.start_date} to {state.end_date}"
+
+    def _resolve_travelers(self, state: PlanState, intent: IntentResult, context: Dict[str, Any]) -> None:
+        """
+        Group size: a number in the message wins, then the UI selector, then
+        the session's earlier value. Budgets are kept as the group total, so a
+        per-person budget ("5000 each") is multiplied out here.
+        """
+        if intent.travelers:
+            state.travelers = money.clamp_travelers(intent.travelers)
+        elif context.get("travelers"):
+            state.travelers = money.clamp_travelers(context["travelers"])
+        else:
+            state.travelers = money.clamp_travelers(state.travelers or 1)
+
+        if intent.budget is not None and intent.budget_per_person:
+            state.budget = float(intent.budget) * state.travelers
 
     def _resolve_currency(self, state: PlanState, intent: IntentResult, message: str) -> None:
         explicit = intent.currency or money.detect_currency(message)
@@ -982,8 +1048,14 @@ class PlanningAgent:
 
         # Budget: drop the most expensive removable activities first
         if state.budget is not None:
+            travelers = state.travelers or 1
+
             def total() -> float:
-                return sum(a.estimated_cost or 0 for d in plan.days for s in d.slots for a in s.activities)
+                # the budget is for the whole group, so compare group costs
+                return sum(
+                    money.group_cost(a.type, a.estimated_cost, travelers)
+                    for d in plan.days for s in d.slots for a in s.activities
+                )
 
             removed: List[str] = []
             guard = 0
@@ -995,7 +1067,10 @@ class PlanningAgent:
                     for slot in day.slots:
                         for activity in slot.activities:
                             if (activity.estimated_cost or 0) > 0 and day_count > 1:
-                                candidates.append((activity.estimated_cost, day, slot, activity))
+                                candidates.append((
+                                    money.group_cost(activity.type, activity.estimated_cost, travelers),
+                                    day, slot, activity,
+                                ))
                 if not candidates:
                     break
                 _, _, slot, activity = max(candidates, key=lambda c: c[0])
@@ -1077,12 +1152,25 @@ class PlanningAgent:
             plan.location = state.location or plan.location
             plan.currency = state.currency or plan.currency
             plan.plan_type = "trip"
-            costs = [a.estimated_cost for d in days for s in d.slots for a in s.activities
-                     if a.estimated_cost is not None]
-            plan.estimated_total_cost = float(sum(costs)) if costs else None
+            # Activity costs are per person (hotels: per room per night); the
+            # total is what the whole group pays, split evenly per person.
+            travelers = money.clamp_travelers(state.travelers or 1)
+            priced = [a for d in days for s in d.slots for a in s.activities if a.estimated_cost is not None]
+            plan.travelers = travelers
+            plan.rooms = money.rooms_needed(travelers) if any(a.type == "hotel" for a in priced) else None
+            if priced:
+                plan.estimated_total_cost = float(sum(
+                    money.group_cost(a.type, a.estimated_cost, travelers) for a in priced
+                ))
+                plan.cost_per_person = money.split_evenly(plan.estimated_total_cost, travelers)
+            else:
+                plan.estimated_total_cost = None
+                plan.cost_per_person = None
         else:
             plan.plan_type = "study"
             plan.estimated_total_cost = None
+            plan.cost_per_person = None
+            plan.rooms = None
         plan.start_date = state.start_date
         plan.end_date = days[-1].date if days and days[-1].date else state.end_date
         return plan
@@ -1321,6 +1409,8 @@ class PlanningAgent:
             "end_date": state.end_date,
             "duration_days": state.duration_days,
             "budget": state.budget,
+            "travelers": state.travelers or 1,
+            "budget_per_person": money.split_evenly(state.budget, state.travelers or 1),
             "currency": state.currency,
             "currency_symbol": money.currency_symbol(state.currency).strip(),
             "data_source": self._data_source(state) if state.chosen_options else None,
@@ -1392,7 +1482,14 @@ class PlanningAgent:
                         bits.append(act.start_time)
                     bits.append(f"{emoji.get(act.type, '•')} {act.name}")
                     line = "- " + " ".join(bits)
-                    if act.estimated_cost:
+                    if act.estimated_cost and plan.travelers > 1:
+                        if act.type == "hotel":
+                            rooms = money.rooms_needed(plan.travelers)
+                            line += (f" ({money.format_money(act.estimated_cost, currency)}/room"
+                                     f" × {rooms} room{'s' if rooms > 1 else ''})")
+                        else:
+                            line += f" ({money.format_money(act.estimated_cost, currency)} per person)"
+                    elif act.estimated_cost:
                         line += f" ({money.format_money(act.estimated_cost, currency)})"
                     elif act.estimated_cost == 0 and act.type == "attraction":
                         line += " (free)"
@@ -1401,8 +1498,22 @@ class PlanningAgent:
                         line += f" - {note}"
                     lines.append(line)
 
-        if plan.estimated_total_cost is not None:
-            budget_line = f"\n💰 **Estimated total:** {money.format_money(plan.estimated_total_cost, currency)} per person"
+        if plan.estimated_total_cost is not None and plan.travelers > 1:
+            lines.append(
+                f"\n💰 **Estimated total for {plan.travelers} travellers:** "
+                f"{money.format_money(plan.estimated_total_cost, currency)}"
+                f" · **{money.format_money(plan.cost_per_person, currency)} per person**"
+            )
+            if plan.rooms:
+                lines.append(f"🛏️ Hotel costs assume {plan.rooms} room{'s' if plan.rooms > 1 else ''} "
+                             f"(2 people per room), shared equally.")
+            if state.budget:
+                lines.append(
+                    f"🧾 **Group budget:** {money.format_money(state.budget, currency)} "
+                    f"({money.format_money(money.split_evenly(state.budget, plan.travelers), currency)} each)"
+                )
+        elif plan.estimated_total_cost is not None:
+            budget_line = f"\n💰 **Estimated total:** {money.format_money(plan.estimated_total_cost, currency)}"
             if state.budget:
                 budget_line += f" of your {money.format_money(state.budget, currency)} budget"
             lines.append(budget_line)
@@ -1427,11 +1538,24 @@ class PlanningAgent:
 
     def _build_constraints_summary(self, state: PlanState) -> str:
         parts = []
-        if state.budget is not None:
+        travelers = state.travelers or 1
+        if travelers > 1:
             parts.append(
-                f"Budget: {money.format_money(state.budget, state.currency)} "
-                f"({state.currency or 'currency unspecified'}) total per person"
+                f"Group: {travelers} travellers sharing {money.rooms_needed(travelers)} hotel room(s)"
             )
+        if state.budget is not None:
+            if travelers > 1:
+                parts.append(
+                    f"Budget: {money.format_money(state.budget, state.currency)} "
+                    f"({state.currency or 'currency unspecified'}) for the WHOLE group, i.e. about "
+                    f"{money.format_money(money.split_evenly(state.budget, travelers), state.currency)} "
+                    f"per person in total"
+                )
+            else:
+                parts.append(
+                    f"Budget: {money.format_money(state.budget, state.currency)} "
+                    f"({state.currency or 'currency unspecified'}) total"
+                )
         if state.duration_days is not None:
             parts.append(f"Duration: exactly {state.duration_days} day(s)")
         if state.start_date:

@@ -124,6 +124,13 @@ def _to_place(item: Dict[str, Any]) -> Place:
         or address.get("suburb") or address.get("county") or address.get("state")
         or (item.get("display_name") or "").split(",")[0]
     )
+    # Councils / boundaries ("Jaipur Municipal Corporation") carry the plain
+    # city name in the address - use that so people see "Jaipur".
+    kind = item.get("addresstype") or item.get("type") or ""
+    city = address.get("city") or address.get("town") or address.get("village")
+    if kind in ("local_authority", "administrative", "boundary", "municipality") and city \
+            and city.lower() in str(name).lower():
+        name = city
 
     # Search radius from the bounding box (half diagonal), clamped
     radius_m = 6000

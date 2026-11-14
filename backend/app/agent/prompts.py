@@ -46,6 +46,8 @@ Respond with ONLY a JSON object (no markdown, no explanation) with these fields:
     "end_date": "<YYYY-MM-DD or null>",
     "budget": <number or null>,
     "currency": "<ISO code such as INR, USD, GBP, EUR if the user named a currency, else null>",
+    "travelers": <number of people travelling if the user said it (e.g. "4 of us" = 4, "with my wife" = 2, "solo" = 1), else null>,
+    "budget_per_person": <true only if the budget is explicitly per person ("5000 each", "per head"), else false>,
     "preferences": ["<food / stay / style preferences like vegetarian, cheap, luxury, wifi, italian>"],
     "interests": ["<interests like museums, history, nature, temples, shopping>"],
     "is_modification": <true if the user is changing an existing plan, false otherwise>,
@@ -102,7 +104,7 @@ Respond with ONLY a JSON object:
                             "name": "<place name>",
                             "type": "<attraction | restaurant | hotel | transport | activity>",
                             "start_time": "<HH:MM 24h>",
-                            "estimated_cost": <typical cost per person in {currency}, 0 if free>,
+                            "estimated_cost": <typical cost PER PERSON in {currency} (hotels: PER ROOM PER NIGHT), 0 if free>,
                             "duration_minutes": <number>,
                             "details": {{"note": "<one short practical tip>"}}
                         }}
@@ -127,9 +129,12 @@ RULES:
   Include lunch and dinner at restaurants. Group nearby places on the same day.
 - Do not repeat the same attraction or restaurant on different days.
 - For multi-day trips with hotel options, add the chosen hotel as a "hotel" activity in the
-  evening slot of every day except the last, with its per-night cost.
-- All costs are realistic per-person estimates in {currency}. Respect every constraint,
-  and keep the sum of all costs within the budget when one is given.
+  evening slot of every day except the last, with its cost per room per night.
+- Costs are realistic estimates in {currency}: PER PERSON for everything except hotels, which are
+  PER ROOM PER NIGHT (two travellers share a room). Do not multiply by the group size yourself -
+  the application computes group totals and each person's share.
+- If a group size and budget are given, the budget is for the WHOLE group: choose options whose
+  group cost fits it. Respect every other constraint too.
 - Honor dietary preferences in every restaurant choice.
 - Keep "details" small. Respond with ONLY the JSON object."""
 
@@ -216,7 +221,8 @@ RULES:
 - Fix ALL listed problems.
 - The number of days must equal the requested duration exactly.
 - Prefer cheaper alternatives or remove optional activities if budget is the issue.
-- Costs are per-person estimates in {currency}.
+- Costs are estimates in {currency}: per person, except hotels which are per room per night.
+  A budget is for the whole group when a group size is given.
 - Prefer names from the available options; mark anything else with
   "details": {{"source": "ai_suggested"}}.
 - Respond with ONLY the JSON object."""

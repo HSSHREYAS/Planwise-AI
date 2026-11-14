@@ -56,6 +56,7 @@ class ResponseStatus(str, Enum):
     REPLANNING = "replanning"
     CONSTRAINT_FAILURE = "constraint_failure"
     TOOL_FAILURE = "tool_failure"
+    CANCELLED = "cancelled"
     ERROR = "error"
 
 
@@ -85,6 +86,28 @@ class IntentResult(BaseModel):
     start_date: Optional[str] = Field(default=None, description="Trip start date, ISO YYYY-MM-DD")
     end_date: Optional[str] = Field(default=None, description="Trip end date, ISO YYYY-MM-DD")
     currency: Optional[str] = Field(default=None, description="ISO currency code the user mentioned")
+    travelers: Optional[int] = Field(default=None, description="Number of people travelling")
+    budget_per_person: bool = Field(
+        default=False, description="True when the stated budget is per person, not for the group"
+    )
+
+    @field_validator("travelers", mode="before")
+    @classmethod
+    def coerce_travelers(cls, v):
+        if v in (None, "null", "None", "", 0, "0"):
+            return None
+        try:
+            value = int(float(str(v).strip()))
+        except ValueError:
+            return None
+        return max(1, min(value, 50))
+
+    @field_validator("budget_per_person", mode="before")
+    @classmethod
+    def coerce_per_person(cls, v):
+        if isinstance(v, str):
+            return v.strip().lower() in ("true", "yes", "1")
+        return bool(v)
     is_modification: bool = Field(default=False, description="True if modifying existing plan")
     raw_changes: Optional[Dict[str, Any]] = Field(default=None, description="Detected changes for replanning")
 
@@ -297,7 +320,14 @@ class Plan(BaseModel):
     location: Optional[str] = None
     duration_days: int = 1
     days: List[PlanDay] = Field(default_factory=list)
-    estimated_total_cost: Optional[float] = None
+    estimated_total_cost: Optional[float] = Field(
+        default=None, description="What the whole group pays (computed in Python)"
+    )
+    travelers: int = Field(default=1, description="Number of people the plan is for")
+    rooms: Optional[int] = Field(default=None, description="Hotel rooms assumed (2 people per room)")
+    cost_per_person: Optional[float] = Field(
+        default=None, description="Each traveller's even share of the total"
+    )
     currency: Optional[str] = Field(default=None, description="ISO currency code for all costs")
     start_date: Optional[str] = None
     end_date: Optional[str] = None
@@ -372,8 +402,9 @@ class PlanState(BaseModel):
     start_date: Optional[str] = None
     end_date: Optional[str] = None
     duration_days: Optional[int] = None
-    budget: Optional[float] = None
+    budget: Optional[float] = Field(default=None, description="Total budget for the whole group")
     currency: Optional[str] = None
+    travelers: int = Field(default=1, description="Number of people travelling")
     preferences: List[str] = Field(default_factory=list)
     interests: List[str] = Field(default_factory=list)
     subtasks: List[Task] = Field(default_factory=list)

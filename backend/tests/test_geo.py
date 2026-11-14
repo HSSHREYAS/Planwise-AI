@@ -263,3 +263,16 @@ class TestToolRouting:
         result = execute_tool("hotel_search", {"location": "centre", "budget": "cheap"})
         assert result.success and result.results
         assert all(r["source"] == "multiwoz" for r in result.results)
+
+
+class TestGroupMoney:
+    def test_rooms_and_group_cost(self):
+        assert [money.rooms_needed(n) for n in (1, 2, 3, 4, 5)] == [1, 1, 2, 2, 3]
+        assert money.group_cost("restaurant", 300, 4) == 1200
+        assert money.group_cost("hotel", 2000, 4) == 4000
+        assert money.group_cost("hotel", 2000, 3) == 4000
+        assert money.group_cost("attraction", None, 4) == 0
+        assert money.split_evenly(1000, 3) == 333.33
+        assert money.split_evenly(None, 3) is None
+        assert money.clamp_travelers(0) == 1 and money.clamp_travelers(999) == 50
+        assert money.clamp_travelers("x") == 1
