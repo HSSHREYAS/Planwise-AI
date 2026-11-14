@@ -46,6 +46,9 @@ class RetrievalService:
         # Generate query embedding
         try:
             query_embedding = generate_single_embedding(query)
+        except ImportError:
+            # Lightweight install without sentence-transformers: metadata filtering
+            return self._filter_records(domain, filters, top_k)
         except Exception as e:
             logger.error(f"Embedding generation failed: {e}")
             # Fallback to metadata-only filtering

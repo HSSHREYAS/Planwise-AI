@@ -1,0 +1,12 @@
+# PlanWise AI - lightweight dependencies for free cloud hosting
+#
+# Leaves out faiss-cpu and sentence-transformers (PyTorch), which need far
+# more memory and disk than free tiers provide. Without them the bundled
+# Cambridge dataset is searched by metadata filtering instead of semantic
+# vectors; everything else (live locations, hosted LLM, planning) is identical.
+fastapi>=0.104.0
+uvicorn>=0.24.0
+pydantic>=2.5.0
+python-dotenv>=1.0.0
+requests>=2.31.0
+numpy>=1.24.0

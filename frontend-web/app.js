@@ -4,9 +4,12 @@
  */
 
 // --- Configuration & API ---
-const API_BASE = window.location.port === '3000' || window.location.port === '5173'
-  ? '/api/v1'
-  : 'http://127.0.0.1:8000/api/v1';
+// Same origin everywhere: the Vite dev server proxies /api to the backend, and in
+// production the backend serves this page itself. Only a file opened straight
+// from disk needs an absolute URL.
+const API_BASE = window.location.protocol === 'file:'
+  ? 'http://127.0.0.1:8000/api/v1'
+  : '/api/v1';
 
 const REQUEST_TIMEOUT_MS = 180000;
 const MAX_TRIP_DAYS = 14;

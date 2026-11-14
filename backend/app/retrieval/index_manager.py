@@ -18,6 +18,7 @@ logger = logging.getLogger(__name__)
 # Module-level cache for loaded indexes
 _indexes: Dict[str, Any] = {}
 _metadata: Dict[str, List[Dict]] = {}
+_plain_records: Dict[str, List[Dict]] = {}
 
 
 def load_index(domain: str) -> bool:
@@ -30,7 +31,13 @@ def load_index(domain: str) -> bool:
     Returns:
         True if loaded successfully
     """
-    import faiss
+    try:
+        import faiss
+    except ImportError:
+        # Lightweight install (e.g. free cloud hosting): no vector search,
+        # records are served through metadata filtering instead.
+        logger.debug("faiss is not installed - using metadata filtering only")
+        return False
 
     index_path = Path(INDEX_DIR) / f"{domain}.faiss"
     metadata_path = Path(INDEX_DIR) / f"{domain}_metadata.json"
@@ -113,15 +120,17 @@ def get_all_records(domain: str) -> List[Dict[str, Any]]:
     """Get all records for a domain (for non-FAISS filtering)."""
     if domain not in _metadata:
         if not load_index(domain):
-            # Try loading directly from processed data
-            from app.config import PROCESSED_DATA_DIR
-            data_path = Path(PROCESSED_DATA_DIR) / f"{domain}s.json"
-            if not data_path.exists():
-                data_path = Path(PROCESSED_DATA_DIR) / f"{domain}.json"
-            if data_path.exists():
+            # No FAISS index: load the processed records directly (and cache them)
+            if domain not in _plain_records:
+                from app.config import PROCESSED_DATA_DIR
+                data_path = Path(PROCESSED_DATA_DIR) / f"{domain}s.json"
+                if not data_path.exists():
+                    data_path = Path(PROCESSED_DATA_DIR) / f"{domain}.json"
+                if not data_path.exists():
+                    return []
                 with open(data_path, "r", encoding="utf-8") as f:
-                    return json.load(f)
-            return []
+                    _plain_records[domain] = json.load(f)
+            return _plain_records[domain]
     return _metadata.get(domain, [])
 
 

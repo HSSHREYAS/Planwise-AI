@@ -1,0 +1,28 @@
+# Render Blueprint - one free web service runs the whole site
+# (FastAPI backend + the static web frontend it serves).
+#
+# Deploy: https://render.com/deploy?repo=https://github.com/HSSHREYAS/Planwise-AI
+services:
+  - type: web
+    name: planwise-ai
+    runtime: python
+    plan: free
+    rootDir: backend
+    buildCommand: pip install -r requirements-deploy.txt && python -m scripts.preprocess_multiwoz
+    startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /api/v1/health
+    autoDeploy: true
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.11.9
+      - key: LLM_PROVIDER
+        value: auto
+      - key: LOG_LEVEL
+        value: INFO
+      # Free keys - paste the value in the Render dashboard (never commit it):
+      #   Groq:   https://console.groq.com/keys
+      #   Gemini: https://aistudio.google.com/apikey
+      - key: GROQ_API_KEY
+        sync: false
+      - key: GEMINI_API_KEY
+        sync: false

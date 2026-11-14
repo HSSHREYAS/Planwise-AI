@@ -957,6 +957,22 @@ npm run dev
 The legacy Streamlit UI (`frontend/`, `streamlit run app.py`) still works for chat but does not have the
 location picker or date range.
 
+### Deploy for Free (Render, straight from GitHub)
+
+The repository contains a `render.yaml` blueprint: one free web service runs the backend, which also
+serves the web frontend, so there is nothing else to host.
+
+1. Open **https://render.com/deploy?repo=https://github.com/HSSHREYAS/Planwise-AI** and sign in with GitHub.
+2. When asked for environment variables, paste a free `GROQ_API_KEY` (https://console.groq.com/keys)
+   and/or `GEMINI_API_KEY`. They can be left empty, but then AI replies are limited to about one per 45 seconds.
+3. Click **Apply**. After the build (2-3 minutes) the site is live at `https://planwise-ai.onrender.com`
+   (Render adds a suffix if the name is taken). Every push to `master` redeploys automatically.
+
+Notes: the free plan sleeps after 15 minutes without traffic, so the first visit afterwards takes about a
+minute. The deployment uses `backend/requirements-deploy.txt`, which leaves out FAISS and
+sentence-transformers (too heavy for free tiers); the Cambridge dataset is then searched by metadata
+filtering instead of semantic vectors. Sessions are in memory and reset on each restart.
+
 ### Using It
 1. Allow location access when the browser asks (or type any city in **Where** and pick a suggestion). The 📍 button re-detects your current location.
 2. Optionally choose **From** and **To** dates, what to plan, and a budget style, then press search.
