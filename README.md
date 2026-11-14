@@ -4,6 +4,12 @@
 > Submission Deadline: 30 October 2026  
 > Version: 2.0.0
 
+### 🌐 Live Demo: **[planwise-ai-bqcm.onrender.com](https://planwise-ai-bqcm.onrender.com)**
+
+[![PlanWise AI home page](docs/screenshot-home.jpg)](https://planwise-ai-bqcm.onrender.com)
+
+> Hosted on Render's free plan: if the site has been idle, the first visit can take about a minute to wake up.
+
 ## What's New in v2
 
 | Area | v1 | v2 |
