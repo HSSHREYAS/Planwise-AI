@@ -2,7 +2,20 @@
 
 > **Undergraduate GenAI ABL-1 Project**  
 > Submission Deadline: 30 October 2026  
-> Version: 1.0.0
+> Version: 2.0.0
+
+## What's New in v2
+
+| Area | v1 | v2 |
+|------|----|----|
+| **LLM** | Local Ollama (Qwen2.5-3B) | **Hosted free-tier LLM APIs** - Groq, Google Gemini, OpenRouter, with automatic fallback and a keyless endpoint so it works with zero setup |
+| **Location** | Cambridge, UK only | **Any place in the world** - your current location (browser GPS) or a place you search for; live hotels, restaurants, attractions and transport hubs from OpenStreetMap |
+| **Dates** | Not supported | **From / To dates** in the home-page search bar; plans carry real calendar dates per day |
+| **Currency** | Hard-coded | Derived from the destination country (or the currency you mention); totals are computed in Python |
+| **Robustness** | Fails without the LLM | Every step has a deterministic fallback; unverified places are flagged as AI suggestions |
+
+Quick start: run `.\start.ps1`, open the printed frontend URL, and (recommended) add a free
+`GROQ_API_KEY` or `GEMINI_API_KEY` to `.env` - see [Installation & Setup](#16-installation--setup).
 
 ---
 
@@ -54,7 +67,10 @@ The system supports **two primary planning domains**:
 | **Trip Planning** | *"Plan a 2-day trip to Cambridge with places to visit and food options"* |
 | **Study Planning** | *"Plan my study schedule for the next 7 days covering math, physics, and chemistry"* |
 
-The local knowledge base is built from the **MultiWOZ 2.2** dataset, covering hotels, restaurants, attractions, and transport in Cambridge, UK.
+**Data sources.** For any location in the world the agent uses **live OpenStreetMap data** (geocoding and
+category search through Nominatim - free, no API key). For Cambridge, UK it uses the bundled **MultiWOZ 2.2**
+dataset (hotels, restaurants, attractions and train timetables with price information) through FAISS semantic
+search. The language model is a **hosted free-tier LLM API**; no local model is required.
 
 ---
 
@@ -120,9 +136,9 @@ The system must demonstrate an **actual agentic workflow** — not conversationa
           v                 v                 v
     +---------+     +-----------+    +------------------+
     |  TOOLS  |     |    LLM    |    |   VALIDATION     |
-    |  Hotel  |     | Qwen2.5   |    |  Constraint      |
+    |  Hotel  |     | Hosted    |    |  Constraint      |
     |  Rest.  |     |  via      |    |  Engine          |
-    |  Attr.  |     |  Ollama   |    |  Verifier        |
+    |  Attr.  |     |  LLM API  |    |  Verifier        |
     |  Trans. |     +-----------+    +------------------+
     +----+----+
          |
@@ -150,7 +166,7 @@ The system must demonstrate an **actual agentic workflow** — not conversationa
 | **Presentation** | Streamlit | Chat UI, plan rendering, session controls |
 | **API / Controller** | FastAPI + Uvicorn | REST endpoints, CORS, session routing |
 | **Agent / Orchestration** | Python State Machine | Intent -> Decompose -> Execute -> Plan -> Validate -> Respond |
-| **LLM** | Qwen2.5-3B-Instruct via Ollama | NL understanding, planning decisions, response generation |
+| **LLM** | Hosted free-tier LLM API (Groq / Gemini / OpenRouter / keyless fallback) | NL understanding, planning decisions, response generation |
 | **State Management** | Pydantic models | Session context, conversation history, plan state |
 | **Tools** | Python functions | Domain search wrappers (hotel, restaurant, attraction, transport) |
 | **Retrieval** | FAISS + sentence-transformers | Semantic vector search over local data |
@@ -240,8 +256,9 @@ handle_message(message, state)
 | Component | Technology | Version | Purpose |
 |-----------|-----------|---------|---------|
 | **Language** | Python | 3.x | Primary implementation language |
-| **LLM** | Qwen2.5-3B-Instruct | Latest | NL understanding, planning, response generation |
-| **LLM Runtime** | Ollama | Latest | Local LLM serving (no cloud API) |
+| **LLM** | Hosted free-tier APIs: Groq (`llama-3.3-70b-versatile`), Google Gemini (`gemini-2.5-flash`), OpenRouter (`:free` models), keyless Pollinations fallback | OpenAI-compatible chat API | NL understanding, planning, response generation |
+| **Live Location Data** | OpenStreetMap Nominatim | Public API | Geocoding, reverse geocoding, hotels / restaurants / attractions / transport hubs anywhere |
+| **Web UI** | Vite + vanilla JS (`frontend-web/`) | Vite 5 | Search bar with location + dates, chat, itinerary drawer |
 | **Agent Orchestration** | Plain Python State Machine | — | Sequential workflow control |
 | **UI Framework** | Streamlit | >=1.28.0 | Chat interface and plan display |
 | **API Framework** | FastAPI | >=0.104.0 | RESTful backend API |
@@ -261,8 +278,8 @@ handle_message(message, state)
 
 | Decision | Rationale |
 |----------|-----------|
-| **Qwen2.5-3B-Instruct** | Small, efficient model suited for structured JSON output; runs locally |
-| **Ollama** | Zero-cost local LLM serving; no cloud API keys required |
+| **Hosted free LLM APIs** | No GPU or local model download; much stronger models than a local 3B model; one OpenAI-compatible client covers every provider, with automatic fallback |
+| **OpenStreetMap (Nominatim)** | Free worldwide place data with no API key; lets the app work for the user's current or chosen location |
 | **Plain Python State Machine** | Simplest, most transparent orchestration; no framework overhead |
 | **FAISS-CPU** | Efficient vector search without GPU; handles the dataset size comfortably |
 | **MultiWOZ 2.2** | Freely available, well-structured travel dataset; avoids paid APIs |
@@ -290,8 +307,12 @@ planwise-AI/
 |   |   +-- api/                    # REST API layer
 |   |   |   +-- routes.py           # FastAPI routes
 |   |   |
+|   |   +-- geo/                    # Live location data (OpenStreetMap)
+|   |   |   +-- geocoder.py         # Geocoding, reverse geocoding, autocomplete
+|   |   |   +-- places.py           # Live hotels / restaurants / attractions / transport
+|   |   |
 |   |   +-- llm/                    # LLM client
-|   |   |   +-- ollama_client.py    # Qwen2.5 via Ollama
+|   |   |   +-- client.py           # Hosted LLM APIs (Groq / Gemini / OpenRouter / keyless)
 |   |   |
 |   |   +-- models/                 # Pydantic schemas
 |   |   |   +-- schemas.py          # Core data models (PlanState, Plan, etc.)
@@ -397,23 +418,32 @@ The central orchestrator. The `PlanningAgent` class is 948 lines and implements 
 | `_is_single_domain_search()` | — | Routes hotel/restaurant/attraction/transport searches |
 | `_handle_search_results()` | COMPLETED | Returns search results without full planning |
 
-### 7.2 LLM Client (`backend/app/llm/ollama_client.py`)
+### 7.2 LLM Client (`backend/app/llm/client.py`)
 
-Single controlled interface to Qwen2.5-3B-Instruct via Ollama's REST API.
+Single controlled interface to hosted LLM APIs. Every supported provider speaks the OpenAI
+"chat completions" protocol, so one client covers them all.
+
+| Provider | Key needed | Default model | Notes |
+|----------|-----------|---------------|-------|
+| Groq | free key - https://console.groq.com/keys | `llama-3.3-70b-versatile` | Recommended: very fast |
+| Google Gemini | free key - https://aistudio.google.com/apikey | `gemini-2.5-flash` | |
+| OpenRouter | free key - https://openrouter.ai/keys | `google/gemma-4-31b-it:free` | Any `:free` model |
+| Pollinations | **none** | `openai` | Keyless fallback: about one reply per 45 s, slow |
+| Custom / Ollama | optional | configurable | Any OpenAI-compatible endpoint |
 
 **Key Features:**
-- `generate()` — Freetext generation with system prompt support
-- `generate_structured()` — JSON output validated against a Pydantic schema with automatic retry (up to `LLM_MAX_RETRIES`)
-- `_extract_json()` — Robust JSON extraction from LLM output (handles markdown code blocks, surrounding text)
-- `is_available()` — Health check for Ollama server
+- **Provider chain with fallback** - `LLM_PROVIDER=auto` uses every provider that has a key (Groq -> Gemini -> OpenRouter -> custom), then the keyless endpoint. A provider that fails or is rate limited is put on a short cooldown and the next one is tried.
+- `generate()` - text generation with system prompt and conversation history
+- `generate_structured()` - JSON output validated against a Pydantic schema with automatic retry (up to `LLM_MAX_RETRIES`); uses the provider's JSON mode where available
+- `_extract_json()` - robust JSON extraction (markdown code blocks, surrounding text)
+- **Limited ("frugal") mode** - when only the keyless endpoint is configured, the agent spends its single AI call on the answer itself and uses rule-based logic for intent detection, so the app still responds from a live API with zero setup.
 
-**Configuration:**
-```
-OLLAMA_BASE_URL  = http://localhost:11434
-OLLAMA_MODEL     = qwen2.5:3b-instruct
-LLM_TIMEOUT      = 180 seconds
-LLM_MAX_RETRIES  = 2
-```
+### 7.2a Live Location Services (`backend/app/geo/`)
+
+- `geocoder.py` - place name -> coordinates (`geocode`, `search` for autocomplete) and coordinates -> place (`reverse`, used for "use my current location"). Throttled to 1 request/second and cached, per the Nominatim usage policy.
+- `places.py` - real hotels, restaurants, attractions and transport hubs around any coordinates, normalized to the same record shape as the Cambridge dataset, ranked by notability and distance, cached for an hour.
+- `backend/app/money.py` - currency by country, formatting and price-level estimates. All budget arithmetic is deterministic Python.
+- `backend/app/tools/common.py` - routes each tool call to live data, the bundled Cambridge dataset, or an explicit "unknown location" result (never silently substituting Cambridge data for another place).
 
 ### 7.3 Pydantic Data Models (`backend/app/models/schemas.py`)
 
@@ -598,12 +628,32 @@ http://localhost:8000/api/v1
 
 | Method | Endpoint | Description |
 |--------|---------|-------------|
-| `GET` | `/health` | Backend health + Ollama availability check |
+| `GET` | `/health` | Backend health + LLM provider status (`?probe=true` actively tests the LLM) |
+| `GET` | `/geo/search?q=` | Place autocomplete for the location picker |
+| `GET` | `/geo/reverse?lat=&lon=` | Name the user's current location |
+| `POST` | `/geo/prefetch?lat=&lon=` | Warm live data for a picked location |
 | `POST` | `/sessions` | Create a new planning session |
 | `GET` | `/sessions/{session_id}` | Get current session state |
 | `POST` | `/sessions/{session_id}/messages` | **Main endpoint** — send user message |
 | `GET` | `/sessions/{session_id}/plan` | Get current plan with validation |
 | `POST` | `/sessions/{session_id}/replan` | Replan with explicit changes |
+
+**Message context.** `POST /sessions/{id}/messages` accepts an optional `context` with what the user picked in the UI:
+
+```json
+{
+  "message": "Plan a trip to Mysuru",
+  "context": {
+    "location": "Mysuru, India", "lat": 12.3041, "lon": 76.6529,
+    "start_date": "2026-12-12", "end_date": "2026-12-13",
+    "explicit": true
+  }
+}
+```
+
+A place named in the message wins over the context; the context wins over the session's earlier location.
+Responses additionally carry `results` (structured records for result cards), `results_domain`, and a
+`context` object (location, coordinates, dates, duration, budget, currency, data source, LLM provider).
 
 ### Key Request/Response Examples
 
@@ -832,83 +882,93 @@ A standalone Vite/Vanilla JS web application with the same feature set, for depl
 
 | Requirement | Version | Notes |
 |------------|---------|-------|
-| Python | >= 3.10 | Backend and frontend |
-| Ollama | Latest | Local LLM runtime |
-| Git | Any | For cloning |
-| RAM | >= 8 GB | For Qwen2.5-3B + FAISS |
+| Python | >= 3.10 | Backend |
+| Node.js | >= 18 | Web frontend (Vite) |
+| Internet access | - | Hosted LLM API and OpenStreetMap |
+| LLM API key | optional, free | Groq / Gemini / OpenRouter - strongly recommended |
 
-### Step 1 — Clone the Repository
+### Step 1 - Clone the Repository
 ```bash
 git clone <repo-url>
 cd planwise-AI
 ```
 
-### Step 2 — Install Ollama and Download Model
-```bash
-# Install Ollama from https://ollama.com
-# Then pull the model:
-ollama pull qwen2.5:3b-instruct
-```
-
-### Step 3 — Configure Environment
+### Step 2 - Configure Environment
 ```bash
 cp .env.example .env
-# Edit .env as needed (defaults work for local setup)
 ```
 
-### Step 4 — Set Up Backend
+Then add **one free API key** to `.env` (takes about a minute, no credit card):
+
+```
+GROQ_API_KEY=your_key_here        # https://console.groq.com/keys
+# or
+GEMINI_API_KEY=your_key_here      # https://aistudio.google.com/apikey
+```
+
+Without a key the app still works through a keyless endpoint, but that endpoint allows roughly
+**one AI reply every 45 seconds** and is slow. Live map data is always fast.
+
+### Step 3 - Install Dependencies
 ```bash
 cd backend
 pip install -r requirements.txt
+cd ../frontend-web
+npm install
 ```
 
-### Step 5 — Build FAISS Indexes (if not pre-built)
+### Step 4 - Build FAISS Indexes (only if not pre-built)
 ```bash
 cd backend
 python -m scripts.preprocess_multiwoz
 python -m scripts.build_index
 ```
 
-> The pre-built indexes are already committed to `backend/data/index/` — this step is only needed if you want to rebuild them.
-
-### Step 6 — Set Up Frontend
-```bash
-cd frontend
-pip install -r requirements.txt
-```
+> The pre-built indexes are already in `backend/data/index/`. They are only used for Cambridge, UK.
 
 ---
 
 ## 17. Running the Application
 
-### Start Ollama
-```bash
-ollama serve
+### One command (Windows)
+```powershell
+.\start.ps1
 ```
+The script installs dependencies, picks free ports if 8000 / 3000 are already in use, starts the backend
+and the web frontend in two windows, and prints the URLs.
 
-### Start Backend (Terminal 1)
+### Manually
 ```bash
+# Terminal 1 - backend
 cd backend
 uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
-```
 
-### Start Frontend (Terminal 2)
-```bash
-cd frontend
-streamlit run app.py
+# Terminal 2 - web frontend (set BACKEND_PORT if the backend is not on 8000)
+cd frontend-web
+npm run dev
 ```
 
 ### Access the Application
-- **Streamlit UI:** http://localhost:8501
+- **Web UI:** http://localhost:3000
 - **Backend API:** http://localhost:8000
 - **API Docs (Swagger):** http://localhost:8000/docs
 - **Health Check:** http://localhost:8000/api/v1/health
+
+The legacy Streamlit UI (`frontend/`, `streamlit run app.py`) still works for chat but does not have the
+location picker or date range.
+
+### Using It
+1. Allow location access when the browser asks (or type any city in **Where** and pick a suggestion). The 📍 button re-detects your current location.
+2. Optionally choose **From** and **To** dates, what to plan, and a budget style, then press search.
+3. In the planner, the 📍 chip shows the active location - click it to change. Naming a place in a message ("hotels in Jaipur") switches location too.
+4. Refine in chat: "make it 3 days", "change the budget to 8000 rupees", "vegetarian only".
 
 ### Run Tests
 ```bash
 cd backend
 pytest tests/ -v
 ```
+The suite (181 tests) runs offline: the LLM and map services are replaced by fakes.
 
 ---
 
@@ -918,10 +978,18 @@ All configuration is via environment variables (`.env` file):
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `OLLAMA_BASE_URL` | `http://localhost:11434` | Ollama server URL |
-| `OLLAMA_MODEL` | `qwen2.5:3b-instruct` | LLM model name |
-| `LLM_TIMEOUT` | `180` | Request timeout (seconds) |
+| `LLM_PROVIDER` | `auto` | `auto`, `groq`, `gemini`, `openrouter`, `pollinations`, `custom`, `ollama` |
+| `GROQ_API_KEY` / `GROQ_MODEL` | - / `llama-3.3-70b-versatile` | Groq (free key) |
+| `GEMINI_API_KEY` / `GEMINI_MODEL` | - / `gemini-2.5-flash` | Google Gemini (free key) |
+| `OPENROUTER_API_KEY` / `OPENROUTER_MODEL` | - / `google/gemma-4-31b-it:free` | OpenRouter (free key) |
+| `POLLINATIONS_BASE_URL` / `POLLINATIONS_MODEL` | keyless endpoint / `openai` | Fallback that needs no key |
+| `CUSTOM_LLM_BASE_URL` / `_API_KEY` / `_MODEL` | - | Any OpenAI-compatible endpoint |
+| `OLLAMA_BASE_URL` / `OLLAMA_MODEL` | `http://localhost:11434` / `qwen2.5:3b-instruct` | Only with `LLM_PROVIDER=ollama` |
+| `LLM_TIMEOUT` | `60` | Request timeout (seconds) |
 | `LLM_MAX_RETRIES` | `2` | Retries for structured output |
+| `NOMINATIM_URL` | `https://nominatim.openstreetmap.org` | Geocoding / places service |
+| `GEO_USER_AGENT` | `PlanWiseAI/2.0 ...` | Identifies the app to OpenStreetMap |
+| `MAX_TRIP_DAYS` | `14` | Longest plan the agent will build |
 | `RETRIEVAL_TOP_K` | `5` | Max results per search |
 | `EMBEDDING_MODEL` | `all-MiniLM-L6-v2` | sentence-transformers model |
 | `BACKEND_HOST` | `0.0.0.0` | FastAPI server host |
@@ -1012,32 +1080,29 @@ Agent:
 
 ### In Scope
 - Natural-language trip and study planning
-- MultiWOZ 2.2 data (Cambridge, UK only)
-- Budget, duration, and preference constraints
+- Any location worldwide (live OpenStreetMap data) - current location or chosen place
+- Travel dates, budget (in the destination's currency), duration and preference constraints
 - Multi-turn conversation with state retention
 - Replanning on requirement changes
 - Impossible constraint detection
-- Local execution (no cloud required)
 
 ### Out of Scope (Intentional)
 | Excluded | Reason |
 |----------|--------|
 | Paid travel APIs (Booking.com, etc.) | Unnecessary cost and complexity |
-| Real booking / purchasing | Not required for the project |
+| Real booking / purchasing, live prices and availability | Not required for the project |
 | Payment processing | Out of scope |
 | Production authentication (JWT, OAuth) | Not required |
-| Multiple LLMs | Cost and complexity |
-| MongoDB / PostgreSQL | Not required; local files are sufficient |
-| Real-time data | Static dataset is appropriate |
-| Mobile application | Not required |
-| Multi-city planning | Data limited to Cambridge |
+| MongoDB / PostgreSQL | Not required; in-memory sessions are sufficient |
+| Mobile application | The web UI is responsive instead |
 
 ### Known Limitations
-1. **Data Coverage:** All knowledge is limited to Cambridge, UK (MultiWOZ 2.2). Other cities are not supported.
-2. **Cost Estimation:** Costs are estimated from price range categories (cheap/moderate/expensive), not exact figures.
-3. **LLM Variability:** Qwen2.5-3B-Instruct may occasionally produce inconsistent JSON; the retry mechanism handles this.
-4. **Session Persistence:** Sessions are in-memory only; they are lost when the server restarts.
-5. **Concurrency:** In-memory session store is not thread-safe for high concurrency.
+1. **Costs are estimates.** OpenStreetMap carries no prices; per-person costs come from the LLM (or price-level tables) and are summed in Python. They are not quotes.
+2. **Data coverage varies.** OpenStreetMap is excellent in cities and thinner in small towns. When nothing is mapped the assistant says so and may offer AI suggestions, clearly labelled as unverified.
+3. **Train timetables** exist only for Cambridge, UK (bundled dataset). Elsewhere the transport search lists stations and airports, not schedules.
+4. **Free-tier limits.** Hosted LLM free tiers are rate limited; without any key the keyless endpoint allows about one AI reply per 45 seconds. The public Nominatim service is limited to 1 request/second, so the first search for a new city takes a few seconds (then it is cached).
+5. **Session Persistence:** Sessions are in-memory only; they are lost when the server restarts.
+6. **Current location** needs browser permission and a secure context (`localhost` or HTTPS).
 
 ---
 
@@ -1050,7 +1115,7 @@ Agent:
 | **Real API Integration** | Optional hooks for live hotel/restaurant APIs |
 | **Map Integration** | Visualize itinerary on a map |
 | **PDF Export** | Export generated plans as PDF |
-| **Multi-LLM Support** | Switch between Qwen, Llama, Mistral |
+| **Streaming Responses** | Stream the AI answer token by token |
 | **User Authentication** | Save plans per user account |
 | **Streaming Responses** | Stream LLM output for better UX |
 | **LangGraph Migration** | Optional: Replace Python state machine with LangGraph |
@@ -1063,8 +1128,8 @@ Agent:
 |-----------|-------------|
 | MultiWOZ 2.2 — Hugging Face (https://huggingface.co/datasets/pfb30/multi_woz_v22) | Dataset used for knowledge base |
 | MultiWOZ GitHub (https://github.com/budzianowski/multiwoz) | Original MultiWOZ repository |
-| Qwen2.5 — Alibaba (https://huggingface.co/Qwen/Qwen2.5-3B-Instruct) | LLM model used |
-| Ollama (https://ollama.com) | Local LLM runtime |
+| Groq (https://console.groq.com), Google AI Studio (https://aistudio.google.com), OpenRouter (https://openrouter.ai), Pollinations (https://pollinations.ai) | Hosted LLM APIs |
+| OpenStreetMap / Nominatim (https://nominatim.org) | Live place data (c) OpenStreetMap contributors, ODbL |
 | FAISS — Facebook AI (https://github.com/facebookresearch/faiss) | Vector similarity search library |
 | sentence-transformers (https://www.sbert.net) | Sentence embedding library |
 | all-MiniLM-L6-v2 (https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2) | Embedding model |

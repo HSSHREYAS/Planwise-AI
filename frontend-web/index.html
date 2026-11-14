@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>PlanWise AI — Intelligent Travel & Itinerary Assistant</title>
-  <meta name="description" content="Airbnb-inspired AI Travel & Task Planning Assistant grounded in real Cambridge MultiWOZ 2.2 intelligence. Discover stays, dining, sights, and multi-day itineraries." />
+  <meta name="description" content="AI travel and task planning assistant grounded in live map data. Discover stays, dining, sights and day-by-day itineraries for your current location or any destination." />
   <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>🗺️</text></svg>" />
   <link rel="stylesheet" href="./styles.css" />
 </head>
@@ -22,22 +22,22 @@
 
       <nav>
         <ul class="nav-links">
-          <li class="nav-item active" id="nav-explore">Explore</li>
-          <li class="nav-item" id="nav-planner">AI Trip Planner</li>
-          <li class="nav-item" id="nav-how">How It Works</li>
+          <li class="nav-item active" id="nav-explore" role="button" tabindex="0">Explore</li>
+          <li class="nav-item" id="nav-planner" role="button" tabindex="0">AI Trip Planner</li>
+          <li class="nav-item" id="nav-how" role="button" tabindex="0">How It Works</li>
         </ul>
       </nav>
 
       <div class="nav-actions">
         <!-- 3-Way Theme Switcher -->
         <div class="theme-switcher" role="group" aria-label="Theme Selector">
-          <button class="theme-btn active" data-theme-val="light" title="Airbnb Light Mode">
+          <button class="theme-btn active" data-theme-val="light" title="Light mode">
             <span>☀️</span> Light
           </button>
-          <button class="theme-btn" data-theme-val="dark" title="Airbnb Dark Mode">
+          <button class="theme-btn" data-theme-val="dark" title="Dark mode">
             <span>🌙</span> Dark
           </button>
-          <button class="theme-btn" data-theme-val="system" title="Follow System Preference">
+          <button class="theme-btn" data-theme-val="system" title="Follow system preference">
             <span>💻</span> Auto
           </button>
         </div>
@@ -50,62 +50,71 @@
   </header>
 
   <!-- =====================================================================
-       MAIN VIEW 1: AIRBNB EXPLORE & LANDING PAGE
+       MAIN VIEW 1: EXPLORE & LANDING PAGE
        ===================================================================== -->
   <main id="view-landing">
     <!-- Hero Section -->
     <section class="hero-section">
       <div class="container">
         <div class="hero-badge">
-          <span>✨</span> MultiWOZ 2.2 Intelligence · Cambridge Benchmark
+          <span>✨</span> Live map data · AI-built itineraries · Any destination
         </div>
         <h1 class="hero-title">
-          Experience Cambridge.<br />
+          Explore <span id="hero-location">anywhere</span>.<br />
           <span>Planned to Perfection by AI.</span>
         </h1>
         <p class="hero-subtitle">
-          Effortlessly discover verified boutique stays, historic taverns, scenic punting, and custom multi-day itineraries with budget optimization.
+          Real hotels, restaurants and sights around your current location or any place you choose — turned into a day-by-day plan that respects your dates and budget.
         </p>
 
-        <!-- Floating Airbnb Search Capsule -->
+        <!-- Floating Search Capsule -->
         <div class="search-capsule-wrapper" id="search-capsule">
-          <div class="search-field">
-            <label for="search-where">Where in Cambridge</label>
-            <select id="search-where">
-              <option value="centre">Centre (Colleges & Historic Heart)</option>
-              <option value="south">South (Botanic Gardens & Hills)</option>
-              <option value="north">North (Castle Hill & Science Park)</option>
-              <option value="east">East (Mill Road & Arts)</option>
-              <option value="west">West (Backs & University Sites)</option>
-              <option value="any">Anywhere in Cambridge</option>
-            </select>
+          <div class="search-field search-field-where">
+            <label for="search-where">Where</label>
+            <div class="where-input-row">
+              <input type="text" id="search-where" placeholder="Search a city or place" autocomplete="off"
+                     role="combobox" aria-expanded="false" aria-controls="search-where-results" aria-autocomplete="list" />
+              <button type="button" class="locate-btn" id="btn-locate" title="Use my current location" aria-label="Use my current location">📍</button>
+            </div>
+            <div class="place-dropdown" id="search-where-results" role="listbox"></div>
+          </div>
+
+          <div class="search-field search-field-date">
+            <label for="search-start">From</label>
+            <input type="date" id="search-start" aria-label="Start date" />
+          </div>
+
+          <div class="search-field search-field-date">
+            <label for="search-end">To</label>
+            <input type="date" id="search-end" aria-label="End date" />
           </div>
 
           <div class="search-field">
             <label for="search-experience">What to Plan</label>
             <select id="search-experience">
-              <option value="hotels">🏨 Stays & Boutique Hotels</option>
-              <option value="restaurants">🍽️ Historic Dining & Pubs</option>
-              <option value="attractions">🏛️ Colleges & Scenic Sights</option>
-              <option value="trains">🚆 High-Speed Rail Transit</option>
-              <option value="itinerary">🗺️ Complete Multi-Day Itinerary</option>
+              <option value="itinerary">🗺️ Full Itinerary</option>
+              <option value="hotels">🏨 Stays & Hotels</option>
+              <option value="restaurants">🍽️ Dining & Cafés</option>
+              <option value="attractions">🏛️ Sights & Attractions</option>
+              <option value="transport">🚆 Transport Hubs</option>
             </select>
           </div>
 
           <div class="search-field">
             <label for="search-budget">Budget / Style</label>
             <select id="search-budget">
-              <option value="any">Flexible / Any Budget</option>
-              <option value="cheap">Budget Friendly (£)</option>
-              <option value="moderate">Comfort & Moderate (££)</option>
-              <option value="expensive">Luxury & Fine (£££)</option>
+              <option value="any">Flexible</option>
+              <option value="cheap">Budget friendly</option>
+              <option value="moderate">Comfort / mid-range</option>
+              <option value="expensive">Luxury</option>
             </select>
           </div>
 
-          <button class="search-btn" id="btn-capsule-search" title="Search with AI">
+          <button class="search-btn" id="btn-capsule-search" title="Search with AI" aria-label="Search with AI">
             🔍
           </button>
         </div>
+        <div class="capsule-hint" id="capsule-hint" role="status" aria-live="polite"></div>
       </div>
     </section>
 
@@ -116,132 +125,114 @@
           <span class="section-tag">Instant Prompts</span>
           <h2 class="section-title">What Can You Ask PlanWise AI?</h2>
           <p class="section-desc">
-            New here? Don't worry about what to type. Click any card below to launch an instant, verified search grounded in real Cambridge data.
+            Not sure what to type? Click a card to run it for <strong class="loc-inline">your chosen location</strong> — answers come from live map data and a hosted AI model.
           </p>
         </div>
 
         <div class="prompt-grid">
           <!-- Card 1: Stays -->
-          <div class="prompt-card" data-prompt="Find me 4-star hotels in the centre with free wifi and parking">
+          <div class="prompt-card" data-needs-location="true" data-prompt="Find well-rated hotels in {loc} with wifi" role="button" tabindex="0">
             <div class="prompt-card-media">
-              <img src="https://images.unsplash.com/photo-1566073771259-6a8506099945?auto=format&fit=crop&w=800&q=80" alt="Boutique Stay" loading="lazy" />
+              <img src="https://images.unsplash.com/photo-1566073771259-6a8506099945?auto=format&fit=crop&w=800&q=80" alt="Hotel pool at dusk" loading="lazy" />
               <div class="prompt-card-badge">🏨 Stays & Hotels</div>
             </div>
             <div class="prompt-card-body">
-              <div class="prompt-card-title">
-                <span>Boutique & Luxury Stays</span>
-                <span style="font-size:0.9rem; color:var(--text-secondary);">★ 4.9</span>
-              </div>
+              <div class="prompt-card-title"><span>Places to Stay</span></div>
               <p class="prompt-card-desc">
-                Find verified guesthouses and hotels in central Cambridge with free parking, internet, and star ratings.
+                Real hotels, guest houses and hostels near the centre, with star ratings and contact details where available.
               </p>
               <div class="prompt-action-pill">
-                <span>"Find 4-star hotels in the centre with free wifi"</span>
+                <span>"Find well-rated hotels in <em class="loc-name">your city</em>"</span>
                 <span class="arrow">→</span>
               </div>
             </div>
           </div>
 
           <!-- Card 2: Dining -->
-          <div class="prompt-card" data-prompt="Find cheap Italian restaurants in the south or historic pubs">
+          <div class="prompt-card" data-needs-location="true" data-prompt="Find vegetarian-friendly restaurants in {loc}" role="button" tabindex="0">
             <div class="prompt-card-media">
-              <img src="https://images.unsplash.com/photo-1517248135467-4c7edcad34c4?auto=format&fit=crop&w=800&q=80" alt="Cambridge Dining" loading="lazy" />
-              <div class="prompt-card-badge">🍽️ Dining & Pubs</div>
+              <img src="https://images.unsplash.com/photo-1517248135467-4c7edcad34c4?auto=format&fit=crop&w=800&q=80" alt="Restaurant interior" loading="lazy" />
+              <div class="prompt-card-badge">🍽️ Dining & Cafés</div>
             </div>
             <div class="prompt-card-body">
-              <div class="prompt-card-title">
-                <span>Historic Taverns & Dining</span>
-                <span style="font-size:0.9rem; color:var(--text-secondary);">★ 4.8</span>
-              </div>
+              <div class="prompt-card-title"><span>Where to Eat</span></div>
               <p class="prompt-card-desc">
-                Discover world cuisine, riverside pubs, cozy tearooms, and Michelin-rated spots filtered by budget.
+                Restaurants and cafés filtered by cuisine and dietary preference, ranked by distance and detail.
               </p>
               <div class="prompt-action-pill">
-                <span>"Cheap Italian restaurants in the south"</span>
+                <span>"Vegetarian-friendly restaurants in <em class="loc-name">your city</em>"</span>
                 <span class="arrow">→</span>
               </div>
             </div>
           </div>
 
           <!-- Card 3: Attractions -->
-          <div class="prompt-card" data-prompt="What are the best historic colleges and museums to visit in Cambridge?">
+          <div class="prompt-card" data-needs-location="true" data-prompt="What are the best attractions and museums to visit in {loc}?" role="button" tabindex="0">
             <div class="prompt-card-media">
-              <img src="https://images.unsplash.com/photo-1548625361-19597282cb9b?auto=format&fit=crop&w=800&q=80" alt="Colleges & Punting" loading="lazy" />
+              <img src="https://images.unsplash.com/photo-1524492412937-b28074a5d7da?auto=format&fit=crop&w=800&q=80" alt="Historic monument" loading="lazy" />
               <div class="prompt-card-badge">🏛️ Sights & Culture</div>
             </div>
             <div class="prompt-card-body">
-              <div class="prompt-card-title">
-                <span>Colleges, Punting & Culture</span>
-                <span style="font-size:0.9rem; color:var(--text-secondary);">★ 4.95</span>
-              </div>
+              <div class="prompt-card-title"><span>Things to See</span></div>
               <p class="prompt-card-desc">
-                Explore King's College, River Cam punting, the Fitzwilliam Museum, and Cambridge Botanic Gardens.
+                Museums, palaces, viewpoints and landmarks — the notable ones first, straight from the map.
               </p>
               <div class="prompt-action-pill">
-                <span>"Top historic colleges and museums to visit"</span>
+                <span>"Best attractions and museums in <em class="loc-name">your city</em>"</span>
                 <span class="arrow">→</span>
               </div>
             </div>
           </div>
 
-          <!-- Card 4: Trains -->
-          <div class="prompt-card" data-prompt="Find trains from London Kings Cross to Cambridge arriving before 10:00">
+          <!-- Card 4: Transport -->
+          <div class="prompt-card" data-needs-location="true" data-prompt="Show railway stations, bus stations and airports near {loc}" role="button" tabindex="0">
             <div class="prompt-card-media">
-              <img src="https://images.unsplash.com/photo-1474487548417-781cb71495f3?auto=format&fit=crop&w=800&q=80" alt="Train Transit" loading="lazy" />
-              <div class="prompt-card-badge">🚆 Transit & Rail</div>
+              <img src="https://images.unsplash.com/photo-1474487548417-781cb71495f3?auto=format&fit=crop&w=800&q=80" alt="Train on a track" loading="lazy" />
+              <div class="prompt-card-badge">🚆 Transport</div>
             </div>
             <div class="prompt-card-body">
-              <div class="prompt-card-title">
-                <span>High-Speed Train Logistics</span>
-                <span style="font-size:0.9rem; color:var(--text-secondary);">★ 4.7</span>
-              </div>
+              <div class="prompt-card-title"><span>Getting There & Around</span></div>
               <p class="prompt-card-desc">
-                Query direct rail connections between London, Birmingham, and Cambridge with precise departure times.
+                The nearest railway stations, bus terminals and airports, with distances from the centre.
               </p>
               <div class="prompt-action-pill">
-                <span>"Trains from London arriving before 10:00"</span>
+                <span>"Stations and airports near <em class="loc-name">your city</em>"</span>
                 <span class="arrow">→</span>
               </div>
             </div>
           </div>
 
           <!-- Card 5: Full Itinerary -->
-          <div class="prompt-card" data-prompt="Plan a 2-day Cambridge cultural & food weekend under £200">
+          <div class="prompt-card" data-needs-location="true" data-prompt="Plan a 2-day culture and food trip to {loc}" role="button" tabindex="0">
             <div class="prompt-card-media">
-              <img src="https://images.unsplash.com/photo-1506744038136-46273834b3fb?auto=format&fit=crop&w=800&q=80" alt="Full Itinerary" loading="lazy" />
+              <img src="https://images.unsplash.com/photo-1506744038136-46273834b3fb?auto=format&fit=crop&w=800&q=80" alt="Scenic valley landscape" loading="lazy" />
               <div class="prompt-card-badge">🗺️ Full Itinerary</div>
             </div>
             <div class="prompt-card-body">
-              <div class="prompt-card-title">
-                <span>Multi-Day Itinerary Builder</span>
-                <span style="font-size:0.9rem; color:var(--text-secondary);">★ 5.0</span>
-              </div>
+              <div class="prompt-card-title"><span>Multi-Day Itinerary Builder</span></div>
               <p class="prompt-card-desc">
-                Get a personalized, day-by-day itinerary with morning, afternoon, and evening slots plus strict budget checks.
+                A day-by-day plan with morning, afternoon and evening slots, cost estimates and budget checks.
               </p>
               <div class="prompt-action-pill">
-                <span>"Plan a 2-day Cambridge weekend under £200"</span>
+                <span>"Plan a 2-day culture & food trip to <em class="loc-name">your city</em>"</span>
                 <span class="arrow">→</span>
               </div>
             </div>
           </div>
 
           <!-- Card 6: Study & Work -->
-          <div class="prompt-card" data-prompt="Create a 3-day focused Cambridge research and study schedule with breaks">
+          <div class="prompt-card" data-prompt="Create a 3-day focused study schedule for maths and physics with regular breaks" role="button" tabindex="0">
             <div class="prompt-card-media">
-              <img src="https://images.unsplash.com/photo-1521587760476-6c12a4b040da?auto=format&fit=crop&w=800&q=80" alt="Study & Work" loading="lazy" />
+              <img src="https://images.unsplash.com/photo-1521587760476-6c12a4b040da?auto=format&fit=crop&w=800&q=80" alt="Library shelves" loading="lazy" />
               <div class="prompt-card-badge">📚 Focus & Study</div>
             </div>
             <div class="prompt-card-body">
-              <div class="prompt-card-title">
-                <span>Study Sprints & Schedules</span>
-                <span style="font-size:0.9rem; color:var(--text-secondary);">★ 4.85</span>
-              </div>
+              <div class="prompt-card-title"><span>Study Sprints & Schedules</span></div>
               <p class="prompt-card-desc">
-                Structure productive study hours, quiet library blocks, and refreshing walking breaks around Cambridge.
+                Structured study blocks with breaks and variety — no location needed.
               </p>
               <div class="prompt-action-pill">
-                <span>"3-day research & study schedule with breaks"</span>
+                <span>"3-day study schedule for maths & physics"</span>
                 <span class="arrow">→</span>
               </div>
             </div>
@@ -250,71 +241,17 @@
       </div>
     </section>
 
-    <!-- Curated Cambridge Destinations (Airbnb Style) -->
+    <!-- Popular Destinations -->
     <section class="section" style="background: var(--bg-subtle);">
       <div class="container">
         <div class="section-header">
-          <span class="section-tag">Airbnb Stays & Sights</span>
-          <h2 class="section-title">Popular Cambridge Experiences</h2>
-          <p class="section-desc">Hand-picked iconic destinations verified in the MultiWOZ Cambridge benchmark.</p>
+          <span class="section-tag">Need Inspiration?</span>
+          <h2 class="section-title">Popular Destinations</h2>
+          <p class="section-desc">Pick a city to set it as your destination and get an instant AI itinerary. Your dates from the search bar are applied automatically.</p>
         </div>
 
-        <div class="destination-grid">
-          <!-- Item 1 -->
-          <div class="dest-card" data-prompt="Tell me about visiting King's College Chapel and nearby stays">
-            <div class="dest-image-wrap">
-              <img src="https://images.unsplash.com/photo-1569154941061-e231b4725ef1?auto=format&fit=crop&w=600&q=80" alt="King's College" loading="lazy" />
-              <div class="dest-heart">♥</div>
-            </div>
-            <div class="dest-info">
-              <div class="dest-title">King's College Chapel</div>
-              <div class="dest-rating"><span class="star">★</span> 4.96</div>
-            </div>
-            <div class="dest-area">Historic College · Centre</div>
-            <div class="dest-price">£12.50 <span>entry · Architectural landmark</span></div>
-          </div>
-
-          <!-- Item 2 -->
-          <div class="dest-card" data-prompt="Find river punting tours and riverside dining in Cambridge centre">
-            <div class="dest-image-wrap">
-              <img src="https://images.unsplash.com/photo-1513635269975-59663e0ac1ad?auto=format&fit=crop&w=600&q=80" alt="Punting River Cam" loading="lazy" />
-              <div class="dest-heart">♥</div>
-            </div>
-            <div class="dest-info">
-              <div class="dest-title">River Cam Punting Tour</div>
-              <div class="dest-rating"><span class="star">★</span> 4.92</div>
-            </div>
-            <div class="dest-area">Boating Experience · The Backs</div>
-            <div class="dest-price">£25 <span>tour · 45 mins scenic route</span></div>
-          </div>
-
-          <!-- Item 3 -->
-          <div class="dest-card" data-prompt="Tell me about the Fitzwilliam Museum and restaurants nearby">
-            <div class="dest-image-wrap">
-              <img src="https://images.unsplash.com/photo-1579783900882-c0d3dad7b119?auto=format&fit=crop&w=600&q=80" alt="Fitzwilliam Museum" loading="lazy" />
-              <div class="dest-heart">♥</div>
-            </div>
-            <div class="dest-info">
-              <div class="dest-title">The Fitzwilliam Museum</div>
-              <div class="dest-rating"><span class="star">★</span> 4.88</div>
-            </div>
-            <div class="dest-area">Art & Antiquities · South Centre</div>
-            <div class="dest-price">Free entry <span>· World-renowned art</span></div>
-          </div>
-
-          <!-- Item 4 -->
-          <div class="dest-card" data-prompt="Find hotels and cafes near Cambridge Botanic Garden in the south">
-            <div class="dest-image-wrap">
-              <img src="https://images.unsplash.com/photo-1585320806297-9794b3e4eeae?auto=format&fit=crop&w=600&q=80" alt="Cambridge Botanic Garden" loading="lazy" />
-              <div class="dest-heart">♥</div>
-            </div>
-            <div class="dest-info">
-              <div class="dest-title">Cambridge Botanic Garden</div>
-              <div class="dest-rating"><span class="star">★</span> 4.90</div>
-            </div>
-            <div class="dest-area">Botanical Nature · South</div>
-            <div class="dest-price">£8 <span>entry · 16,000 plant species</span></div>
-          </div>
+        <div class="destination-grid" id="destination-grid">
+          <!-- Destination cards are rendered by app.js -->
         </div>
       </div>
     </section>
@@ -325,23 +262,23 @@
         <div class="how-it-works-wrap">
           <span class="section-tag">Agentic Architecture</span>
           <h2 class="section-title">How PlanWise AI Works</h2>
-          <p class="section-desc">A stateful planning agent designed specifically to avoid generic hallucinated travel recommendations.</p>
+          <p class="section-desc">A stateful planning agent designed to avoid generic, hallucinated travel recommendations.</p>
 
           <div class="steps-grid">
             <div class="step-card">
               <div class="step-num">1</div>
-              <h3>Stateful Intent Detection</h3>
-              <p>State machine extracts constraints including budget limits, preferred districts, dates, star ratings, and dietary preferences.</p>
+              <h3>Understands Your Request</h3>
+              <p>A hosted AI model extracts your destination, dates, budget and preferences. No destination? It uses your current location.</p>
             </div>
             <div class="step-card">
               <div class="step-num">2</div>
-              <h3>Multi-Domain Grounding</h3>
-              <p>Queries FAISS semantic vector stores and verified Cambridge MultiWOZ databases covering hotels, restaurants, attractions, and rail transit.</p>
+              <h3>Grounds It in Live Data</h3>
+              <p>The place is geocoded and real hotels, restaurants, sights and transport hubs are pulled live from OpenStreetMap.</p>
             </div>
             <div class="step-card">
               <div class="step-num">3</div>
-              <h3>Constraint Verification</h3>
-              <p>Deterministic validation guarantees budget thresholds and time slots are respected, generating optimized cards and itineraries.</p>
+              <h3>Plans & Verifies</h3>
+              <p>The AI composes the itinerary; deterministic code then checks dates, day counts and budget totals, and flags anything unverified.</p>
             </div>
           </div>
         </div>
@@ -350,7 +287,7 @@
   </main>
 
   <!-- =====================================================================
-       MAIN VIEW 2: AIRBNB CHAT & ITINERARY PLANNER
+       MAIN VIEW 2: CHAT & ITINERARY PLANNER
        ===================================================================== -->
   <main id="view-planner">
     <div class="container planner-container">
@@ -359,56 +296,62 @@
         <!-- Chat Header -->
         <div class="chat-header">
           <div class="chat-header-title">
-            <span class="status-dot"></span>
+            <span class="status-dot" id="status-dot" title="Checking AI status…"></span>
             <h2>PlanWise Assistant</h2>
-            <span id="session-badge" style="font-size:0.75rem; color:var(--text-muted); font-family:monospace;"></span>
+            <span class="llm-badge" id="llm-badge"></span>
           </div>
-          <div style="display:flex; gap:10px; align-items:center;">
+          <div class="chat-header-actions">
+            <div class="location-chip-wrap">
+              <button class="location-chip" id="location-chip" aria-haspopup="dialog" aria-expanded="false" title="Change location">
+                <span>📍</span>
+                <span id="location-chip-label">Set location</span>
+                <span class="chip-caret">▾</span>
+              </button>
+              <div class="location-popover" id="location-popover" role="dialog" aria-label="Choose location">
+                <label for="chip-where">Plan for</label>
+                <input type="text" id="chip-where" placeholder="Search a city or place" autocomplete="off" />
+                <div class="place-dropdown place-dropdown-inline" id="chip-where-results" role="listbox"></div>
+                <button type="button" class="btn-secondary popover-locate" id="btn-chip-locate">📍 Use my current location</button>
+              </div>
+            </div>
             <button class="btn-secondary" id="btn-new-chat" style="padding:6px 14px; font-size:0.82rem;">
               ✨ New Chat
             </button>
             <button class="back-to-explore" id="btn-back-explore">
-              ← Back to Explore
+              ← Explore
             </button>
           </div>
         </div>
 
-        <!-- Category Filter Pills -->
+        <div class="mode-banner" id="mode-banner" hidden></div>
+
+        <!-- Category Shortcut Pills -->
         <div class="category-filter-bar">
-          <button class="filter-chip active" data-filter="all">🌟 All Categories</button>
-          <button class="filter-chip" data-prompt="Find me hotels in the centre">🏨 Stays</button>
-          <button class="filter-chip" data-prompt="Find cheap restaurants in the south">🍽️ Dining</button>
-          <button class="filter-chip" data-prompt="What attractions should I visit in Cambridge?">🏛️ Sights</button>
-          <button class="filter-chip" data-prompt="Find trains to Cambridge arriving before 10:00">🚆 Trains</button>
-          <button class="filter-chip" data-prompt="Plan a 2-day trip to Cambridge with £200 budget">🗓️ 2-Day Plan</button>
+          <button class="filter-chip" data-prompt="Find hotels in {loc}">🏨 Stays</button>
+          <button class="filter-chip" data-prompt="Find good restaurants in {loc}">🍽️ Dining</button>
+          <button class="filter-chip" data-prompt="What are the top attractions in {loc}?">🏛️ Sights</button>
+          <button class="filter-chip" data-prompt="Show railway stations, bus stations and airports near {loc}">🚆 Transport</button>
+          <button class="filter-chip" data-prompt="Plan a 2-day trip to {loc}">🗓️ 2-Day Plan</button>
         </div>
 
         <!-- Chat Messages Container -->
-        <div class="chat-messages" id="chat-messages">
-          <!-- Initial Assistant Welcome Message -->
-          <div class="message-row assistant">
-            <div class="message-avatar">🗺️</div>
-            <div class="message-bubble">
-              <p><strong>Welcome to PlanWise AI!</strong></p>
-              <p>I'm your intelligent Cambridge travel and task assistant. I can search verified hotels, restaurants, attractions, train transit, or build a complete day-by-day itinerary for you.</p>
-              <p>What would you like to explore today?</p>
-            </div>
-          </div>
+        <div class="chat-messages" id="chat-messages" aria-live="polite">
+          <!-- Welcome message is rendered by app.js -->
         </div>
 
         <!-- Chat Input Area -->
         <div class="chat-input-area">
           <div class="chat-input-box">
-            <input type="text" id="chat-input" placeholder="Ask anything... (e.g. 'Find luxury hotels in the centre with free wifi')" autocomplete="off" />
-            <button class="chat-send-btn" id="btn-chat-send" title="Send message">
+            <input type="text" id="chat-input" maxlength="1000" placeholder="Ask anything… e.g. 'Plan a 3-day trip to Jaipur under ₹15,000'" autocomplete="off" />
+            <button class="chat-send-btn" id="btn-chat-send" title="Send message" aria-label="Send message">
               ➤
             </button>
           </div>
           <div class="chat-quick-suggestions">
-            <span class="quick-chip" data-prompt="Find me 4-star hotels in the centre">🏨 4-Star Centre Hotels</span>
-            <span class="quick-chip" data-prompt="Cheap Italian restaurant in the south">🍝 Cheap Italian South</span>
-            <span class="quick-chip" data-prompt="Attractions with free entry in Cambridge">🏛️ Free Attractions</span>
-            <span class="quick-chip" data-prompt="Plan a 1-day itinerary with £100 budget">📅 1-Day Trip (£100)</span>
+            <span class="quick-chip" data-prompt="Find vegetarian restaurants near me" role="button" tabindex="0">🥗 Vegetarian near me</span>
+            <span class="quick-chip" data-prompt="Budget hotels in {loc}" role="button" tabindex="0">🏨 Budget stays</span>
+            <span class="quick-chip" data-prompt="Free things to do in {loc}" role="button" tabindex="0">🏛️ Free things to do</span>
+            <span class="quick-chip" data-prompt="Plan a 1-day trip in {loc}" role="button" tabindex="0">📅 1-Day plan</span>
           </div>
         </div>
       </div>
@@ -417,19 +360,23 @@
       <aside class="itinerary-drawer">
         <div class="itinerary-header">
           <h3>📋 Active Plan & Budget</h3>
-          <p>Real-time schedule breakdown and constraint verification.</p>
+          <p>Schedule breakdown and constraint verification.</p>
         </div>
 
         <div id="itinerary-empty-state" style="text-align:center; padding:30px 10px; color:var(--text-muted);">
           <div style="font-size:2.4rem; margin-bottom:12px;">🗺️</div>
-          <p style="font-size:0.9rem; margin-bottom:8px;"><strong>No active trip plan yet</strong></p>
-          <p style="font-size:0.8rem; line-height:1.5;">Ask to plan a 1-day or multi-day itinerary to see live day slots, estimated budget, and constraint checks appear here.</p>
+          <p style="font-size:0.9rem; margin-bottom:8px;"><strong>No active plan yet</strong></p>
+          <p style="font-size:0.8rem; line-height:1.5;">Ask for a 1-day or multi-day itinerary to see day slots, dates, estimated costs and constraint checks here.</p>
         </div>
 
         <div id="itinerary-content" style="display:none;">
           <div class="itinerary-stat-pill">
             <span>📍 Location:</span>
-            <span id="plan-stat-location" style="color:var(--text-primary);">Cambridge</span>
+            <span id="plan-stat-location" style="color:var(--text-primary);">-</span>
+          </div>
+          <div class="itinerary-stat-pill" id="plan-stat-dates-row">
+            <span>🗓️ Dates:</span>
+            <span id="plan-stat-dates" style="color:var(--text-primary);">-</span>
           </div>
           <div class="itinerary-stat-pill">
             <span>📅 Duration:</span>
@@ -443,6 +390,8 @@
             <span>🛡️ Constraints:</span>
             <span id="plan-stat-validation" style="color:var(--success);">✓ Verified</span>
           </div>
+
+          <div id="plan-warnings" class="plan-warnings" hidden></div>
 
           <hr style="border:none; border-top:1px solid var(--border-color); margin:16px 0;" />
 
@@ -463,12 +412,13 @@
       <div class="footer-content">
         <div>
           <strong>PlanWise AI</strong> · Agentic Personal Task and Trip Planning Assistant
+          <div class="footer-attribution">Place data © <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener noreferrer">OpenStreetMap</a> contributors</div>
         </div>
         <div class="footer-tech">
-          <span class="tech-badge">MultiWOZ 2.2</span>
-          <span class="tech-badge">FAISS Semantic Search</span>
-          <span class="tech-badge">Qwen2.5-3B</span>
+          <span class="tech-badge">Live OpenStreetMap Data</span>
+          <span class="tech-badge">Hosted LLM API</span>
           <span class="tech-badge">FastAPI Backend</span>
+          <span class="tech-badge">Deterministic Validation</span>
         </div>
       </div>
     </div>

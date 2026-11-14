@@ -2,18 +2,27 @@
 PlanWise AI - Prompt Templates
 
 All LLM prompt templates, separated from Python logic.
-Based on Architecture doc Section 11.
 
 Each prompt clearly specifies:
 - Role the model is performing
 - State/data it receives
 - Expected output schema
-- Hallucination guard: "Do not invent information not provided"
+- Grounding rules (what may and may not be invented)
 """
 
+from datetime import date
+from typing import List, Optional
 
-def intent_prompt(message: str, conversation_summary: str = "") -> str:
+SYSTEM_ASSISTANT = (
+    "You are PlanWise AI, a friendly and precise trip and task planning assistant. "
+    "You are grounded in live map data supplied by the application. "
+    "Be concise, concrete and honest about what is verified and what is a suggestion."
+)
+
+
+def intent_prompt(message: str, conversation_summary: str = "", today: Optional[date] = None) -> str:
     """Prompt for understanding user intent and extracting parameters."""
+    today = today or date.today()
     context_section = ""
     if conversation_summary:
         context_section = f"""
@@ -24,60 +33,35 @@ CONVERSATION CONTEXT (previous state):
     return f"""You are PlanWise AI's intent understanding module.
 
 Analyze the user's message and extract their planning intent.
+Today's date is {today.isoformat()} ({today.strftime('%A')}).
 {context_section}
 USER MESSAGE: "{message}"
 
 Respond with ONLY a JSON object (no markdown, no explanation) with these fields:
 {{
     "intent": "<one of: trip_planning, hotel_search, restaurant_search, attraction_search, transport_search, study_planning, schedule_generation, replanning, general_query>",
-    "location": "<location string or null>",
+    "location": "<city/place named in THIS message, or null>",
     "duration_days": <number or null>,
+    "start_date": "<YYYY-MM-DD or null>",
+    "end_date": "<YYYY-MM-DD or null>",
     "budget": <number or null>,
-    "preferences": ["<list of preferences like vegetarian, budget-friendly, etc.>"],
-    "interests": ["<list of interests like culture, food, history, etc.>"],
-    "is_modification": <true if user is changing an existing plan, false otherwise>,
+    "currency": "<ISO code such as INR, USD, GBP, EUR if the user named a currency, else null>",
+    "preferences": ["<food / stay / style preferences like vegetarian, cheap, luxury, wifi, italian>"],
+    "interests": ["<interests like museums, history, nature, temples, shopping>"],
+    "is_modification": <true if the user is changing an existing plan, false otherwise>,
     "raw_changes": {{"<field>": "<new_value>"}} or null
 }}
 
 RULES:
-- If the user mentions changing budget, duration, preferences on an existing plan, set is_modification=true and raw_changes accordingly.
-- Extract ALL mentioned constraints and preferences.
-- If something is not mentioned, use null or empty list.
+- "location" must be a real place name the user wrote in this message. Use null for
+  phrases like "near me", "nearby", "here" or when no place is named.
+- Resolve relative dates ("tomorrow", "next Friday", "this weekend") against today's date.
+- Building a multi-activity itinerary or day plan = trip_planning. Looking for one kind of
+  place = the matching *_search intent. Greetings, travel advice and anything else = general_query.
+- If the user changes budget, duration, dates or preferences of an existing plan, set
+  is_modification=true and fill raw_changes.
+- If something is not mentioned, use null or an empty list.
 - Do NOT invent information the user did not provide.
-- Respond with ONLY the JSON object."""
-
-
-def decomposition_prompt(state_summary: str) -> str:
-    """Prompt for decomposing a goal into subtasks."""
-    return f"""You are PlanWise AI's task decomposition module.
-
-Given the current planning state, decompose the goal into executable subtasks.
-
-CURRENT STATE:
-{state_summary}
-
-Available tools:
-- hotel_search: Search for hotels (params: location, budget, preferences)
-- restaurant_search: Search for restaurants (params: location, budget, preferences)
-- attraction_search: Search for attractions (params: location, interests)
-- transport_search: Search for transport options (params: location, source, destination)
-
-Respond with ONLY a JSON object:
-{{
-    "tasks": [
-        {{
-            "task_type": "<one of: search_hotels, search_restaurants, search_attractions, search_transport, generate_schedule>",
-            "parameters": {{"<param>": "<value>"}}
-        }}
-    ]
-}}
-
-RULES:
-- Only include tasks relevant to the user's request.
-- For trip planning, typically include: attractions, restaurants, and optionally hotels/transport.
-- For study planning, just include generate_schedule (no search tools needed).
-- Use information from the current state for parameters.
-- Do NOT include tasks for domains the user didn't ask about.
 - Respond with ONLY the JSON object."""
 
 
@@ -85,11 +69,13 @@ def schedule_prompt(
     state_summary: str,
     retrieved_options: str,
     constraints_summary: str,
+    currency: str,
+    data_source: str,
 ) -> str:
     """Prompt for generating a candidate schedule/plan."""
     return f"""You are PlanWise AI's schedule generation module.
 
-Generate a structured day-by-day plan using ONLY the retrieved options below.
+Generate a structured day-by-day trip plan.
 
 CURRENT STATE:
 {state_summary}
@@ -97,12 +83,13 @@ CURRENT STATE:
 CONSTRAINTS:
 {constraints_summary}
 
-AVAILABLE OPTIONS (from MultiWOZ 2.2 local data — Cambridge, UK — use ONLY these):
+AVAILABLE OPTIONS ({data_source}):
 {retrieved_options}
 
 Respond with ONLY a JSON object:
 {{
-    "location": "<location or null>",
+    "summary": "<2-3 friendly sentences introducing the plan and its highlights>",
+    "location": "<destination>",
     "duration_days": <number>,
     "days": [
         {{
@@ -112,45 +99,46 @@ Respond with ONLY a JSON object:
                     "time_of_day": "morning",
                     "activities": [
                         {{
-                            "name": "<exact name from retrieved options>",
-                            "type": "<attraction/restaurant/transport/hotel>",
-                            "estimated_cost": <number or null>,
-                            "duration_minutes": <number or null>,
-                            "details": {{}}
+                            "name": "<place name>",
+                            "type": "<attraction | restaurant | hotel | transport | activity>",
+                            "start_time": "<HH:MM 24h>",
+                            "estimated_cost": <typical cost per person in {currency}, 0 if free>,
+                            "duration_minutes": <number>,
+                            "details": {{"note": "<one short practical tip>"}}
                         }}
                     ]
                 }},
-                {{
-                    "time_of_day": "afternoon",
-                    "activities": [...]
-                }},
-                {{
-                    "time_of_day": "evening",
-                    "activities": [...]
-                }}
+                {{"time_of_day": "afternoon", "activities": [...]}},
+                {{"time_of_day": "evening", "activities": [...]}}
             ]
         }}
     ],
-    "estimated_total_cost": <total estimated cost or null>,
     "assumptions": ["<any assumptions made>"],
     "plan_type": "trip"
 }}
 
 RULES:
-- Use ONLY names and details from the AVAILABLE OPTIONS above.
-- Do NOT invent places, restaurants, or attractions not listed.
-- Distribute activities reasonably across days and time slots.
-- Keep total estimated cost within the budget if one is specified.
-- If there aren't enough options, use fewer activities rather than inventing.
-- Each day should have morning, afternoon, and evening slots.
-- Respond with ONLY the JSON object."""
+- Build the plan from the AVAILABLE OPTIONS and copy their names exactly.
+- You may add a FEW iconic, world-famous landmarks or experiences of the destination
+  that are missing from the list. Mark each of those with "details": {{"source": "ai_suggested", ...}}.
+- If a category has no options listed, you may suggest well-known real places for it,
+  again marked with "source": "ai_suggested". Never invent fictional places.
+- Every day needs morning, afternoon and evening slots with at least one activity per day.
+  Include lunch and dinner at restaurants. Group nearby places on the same day.
+- Do not repeat the same attraction or restaurant on different days.
+- For multi-day trips with hotel options, add the chosen hotel as a "hotel" activity in the
+  evening slot of every day except the last, with its per-night cost.
+- All costs are realistic per-person estimates in {currency}. Respect every constraint,
+  and keep the sum of all costs within the budget when one is given.
+- Honor dietary preferences in every restaurant choice.
+- Keep "details" small. Respond with ONLY the JSON object."""
 
 
 def study_schedule_prompt(state_summary: str, constraints_summary: str) -> str:
     """Prompt for generating a study/personal schedule."""
     return f"""You are PlanWise AI's study schedule generation module.
 
-Generate a structured study schedule based on the user's requirements.
+Generate a structured study / personal schedule based on the user's requirements.
 
 CURRENT STATE:
 {state_summary}
@@ -160,6 +148,7 @@ CONSTRAINTS:
 
 Respond with ONLY a JSON object:
 {{
+    "summary": "<2-3 encouraging sentences describing the schedule>",
     "location": null,
     "duration_days": <number>,
     "days": [
@@ -170,34 +159,28 @@ Respond with ONLY a JSON object:
                     "time_of_day": "morning",
                     "activities": [
                         {{
-                            "name": "<study topic/subject>",
+                            "name": "<study topic / task>",
                             "type": "study",
+                            "start_time": "<HH:MM 24h>",
                             "estimated_cost": null,
                             "duration_minutes": <number>,
-                            "details": {{"description": "<what to study>"}}
+                            "details": {{"note": "<what to focus on>"}}
                         }}
                     ]
                 }},
-                {{
-                    "time_of_day": "afternoon",
-                    "activities": [...]
-                }},
-                {{
-                    "time_of_day": "evening",
-                    "activities": [...]
-                }}
+                {{"time_of_day": "afternoon", "activities": [...]}},
+                {{"time_of_day": "evening", "activities": [...]}}
             ]
         }}
     ],
-    "estimated_total_cost": null,
     "assumptions": ["<any assumptions made>"],
     "plan_type": "study"
 }}
 
 RULES:
-- Create a realistic and balanced study schedule.
-- Include breaks and variety if multiple subjects are mentioned.
-- Respect any time constraints the user mentioned.
+- Create a realistic, balanced schedule with breaks ("type": "break") and variety.
+- Respect any time constraints, subjects and deadlines the user mentioned.
+- If no duration is given, plan for a sensible number of days (1 to 7).
 - Respond with ONLY the JSON object."""
 
 
@@ -206,94 +189,113 @@ def replanning_prompt(
     current_plan_summary: str,
     violations: str,
     retrieved_options: str,
+    currency: str,
 ) -> str:
     """Prompt for revising an existing plan after constraint changes."""
     return f"""You are PlanWise AI's replanning module.
 
-The current plan has constraint violations. Revise it to fix the violations
-while preserving as much of the existing plan as possible.
+Revise the current plan so that it satisfies the updated requirements and fixes the
+listed problems, while preserving as much of the existing plan as possible.
 
-CURRENT STATE:
+CURRENT STATE (latest requirements):
 {state_summary}
 
 CURRENT PLAN:
 {current_plan_summary}
 
-VIOLATIONS:
+PROBLEMS TO FIX:
 {violations}
 
-AVAILABLE OPTIONS (use ONLY these):
+AVAILABLE OPTIONS:
 {retrieved_options}
 
-Generate a REVISED plan as a JSON object with the same structure as the original.
-Fix the violations while keeping unchanged parts of the plan intact.
+Respond with ONLY a JSON object with the same structure as the current plan
+(summary, location, duration_days, days → slots → activities, assumptions, plan_type).
 
 RULES:
-- Fix ALL listed violations.
-- Prefer cheaper alternatives if budget is the issue.
-- Remove activities if needed to fit within budget.
-- Use ONLY names from the available options.
-- Do NOT invent new places or options.
+- Fix ALL listed problems.
+- The number of days must equal the requested duration exactly.
+- Prefer cheaper alternatives or remove optional activities if budget is the issue.
+- Costs are per-person estimates in {currency}.
+- Prefer names from the available options; mark anything else with
+  "details": {{"source": "ai_suggested"}}.
 - Respond with ONLY the JSON object."""
 
 
-def response_prompt(plan_summary: str, state_summary: str) -> str:
-    """Prompt for generating the final user-facing natural language response."""
-    return f"""You are PlanWise AI's response generator.
-
-Convert the verified plan into a clear, friendly natural language response for the user.
-
-PLAN:
-{plan_summary}
-
-STATE:
-{state_summary}
-
-Write a clear, well-organized response that includes:
-1. A brief acknowledgment of what was planned
-2. The day-by-day schedule with times and activities
-3. Budget information if applicable
-4. Any relevant notes or assumptions
-
-Keep it concise and readable. Use simple formatting.
-Do NOT add information that isn't in the plan above.
-Do NOT invent additional places or costs."""
-
-
-def clarification_prompt(missing_fields: list, state_summary: str) -> str:
-    """Prompt for generating a clarification request when info is missing."""
-    fields_str = ", ".join(missing_fields)
-    return f"""You are PlanWise AI.
-
-The user wants to create a plan, but some important information is missing.
-
-CURRENT STATE:
-{state_summary}
-
-MISSING INFORMATION: {fields_str}
-
-Write a brief, friendly message asking the user to provide the missing information.
-Be specific about what you need. Keep it to 1-2 sentences."""
-
-
-def search_results_prompt(domain: str, options_summary: str, user_goal: str) -> str:
-    """Prompt for formatting single-domain search results."""
-    return f"""You are PlanWise AI's response generator.
-
-The user searched for {domain} options. Present the results in a clear, helpful way.
+def search_results_prompt(
+    domain: str,
+    options_summary: str,
+    user_goal: str,
+    location: str,
+    constraints_summary: str,
+) -> str:
+    """Prompt for presenting single-domain search results."""
+    return f"""The user is looking for {domain} options in {location}.
 
 USER REQUEST: "{user_goal}"
 
-SEARCH RESULTS:
+USER CONSTRAINTS:
+{constraints_summary}
+
+VERIFIED RESULTS (live data - use ONLY these places):
 {options_summary}
 
-Write a clear, well-organized response that:
-1. Briefly acknowledges the search
-2. Lists each {domain} option with its key details (name, area, price, type, etc.)
-3. Highlights any standout options
-4. Notes that all data is from Cambridge, UK (MultiWOZ 2.2 dataset)
+Write a short, helpful answer in markdown:
+1. One sentence acknowledging the request and the location.
+2. A numbered list of the best matching options (at most 6). For each: **Name** in bold,
+   then a dash and one line with the most useful facts from the data
+   (type / cuisine, area, distance from the centre, stars, entry fee, opening hours).
+3. End with one line recommending a top pick and why.
 
-Use simple formatting with bullet points or numbered lists.
-Do NOT invent information not present in the search results above.
-Keep it concise and readable."""
+RULES:
+- Mention ONLY places from the verified results and copy their names exactly.
+- Do NOT invent phone numbers, prices, ratings or addresses that are not in the data.
+- If the user's preference (e.g. vegetarian, cheap) cannot be confirmed from the data, say so briefly.
+- Keep it under 180 words."""
 
+
+def knowledge_search_prompt(domain: str, user_goal: str, location: str, constraints_summary: str) -> str:
+    """Prompt used when live map data has no results for a search."""
+    return f"""The user is looking for {domain} options in {location}, but the live map lookup
+returned no verified results.
+
+USER REQUEST: "{user_goal}"
+
+USER CONSTRAINTS:
+{constraints_summary}
+
+From your own knowledge, suggest up to 5 well-known, real {domain} options in or near {location}.
+Format: a numbered markdown list, **Name** in bold followed by a dash and one line of detail.
+Only include places you are confident really exist. If you do not know any, say so honestly
+and suggest how the user could refine the search. Keep it under 150 words.
+Do not include phone numbers or exact prices."""
+
+
+def general_prompt(message: str, state_summary: str) -> str:
+    """Prompt for general questions and conversation."""
+    return f"""SESSION CONTEXT:
+{state_summary}
+
+USER MESSAGE: "{message}"
+
+Answer helpfully and concisely (under 170 words) using short paragraphs and bullet lists
+(no tables, no horizontal rules).
+- For travel questions, give practical, specific advice for the location in the context when relevant.
+- You can search hotels, restaurants, attractions and transport hubs anywhere in the world,
+  build day-by-day itineraries with budgets and dates, and create study schedules -
+  mention the relevant capability when it helps the user take the next step.
+- Never invent exact prices, phone numbers or opening hours."""
+
+
+def clarification_text(missing_fields: List[str]) -> str:
+    """Deterministic clarification message (no LLM call needed)."""
+    asks = []
+    if "location" in missing_fields:
+        asks.append(
+            "**where** you'd like to go (type a city, or tap 📍 to use your current location)"
+        )
+    if "duration" in missing_fields:
+        asks.append("**how many days** the trip is, or your travel dates")
+    if not asks:
+        asks = [", ".join(missing_fields)]
+    return "Happy to help! I just need to know " + " and ".join(asks) + "."

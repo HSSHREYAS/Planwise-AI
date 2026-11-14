@@ -16,6 +16,7 @@ from app.models.schemas import (
     PlanState,
     Task,
     ToolResult,
+    normalize_iso_date,
 )
 
 logger = logging.getLogger(__name__)
@@ -160,7 +161,12 @@ class StateManager:
             if key == "budget" and isinstance(value, (int, float)):
                 logger.info(f"Replan: budget {state.budget} → {value}")
                 state.budget = float(value)
-            elif key == "duration_days" and isinstance(value, int):
+            elif key == "budget" and isinstance(value, str) and value.replace(".", "", 1).isdigit():
+                state.budget = float(value)
+            elif key == "duration_days" and isinstance(value, str) and value.isdigit():
+                state.duration_days = int(value)
+            elif key == "duration_days" and isinstance(value, (int, float)) and not isinstance(value, bool):
+                value = int(value)
                 logger.info(
                     f"Replan: duration {state.duration_days} → {value}"
                 )
@@ -174,6 +180,11 @@ class StateManager:
             elif key == "location" and isinstance(value, str):
                 logger.info(f"Replan: location {state.location} → {value}")
                 state.location = value
+                state.place = None
+            elif key in ("start_date", "end_date") and isinstance(value, str):
+                setattr(state, key, normalize_iso_date(value) or getattr(state, key))
+            elif key == "currency" and isinstance(value, str) and len(value.strip()) == 3:
+                state.currency = value.strip().upper()
             else:
                 logger.warning(f"Unknown change key: {key}={value}")
 
@@ -182,33 +193,41 @@ class StateManager:
         return state
 
     @staticmethod
-    def get_conversation_summary(state: PlanState) -> str:
-        """Build a text summary of the current state for LLM context."""
+    def _context_lines(state: PlanState) -> List[str]:
         parts = []
-
         if state.location:
             parts.append(f"Location: {state.location}")
+        if state.start_date:
+            dates = f"Dates: {state.start_date}"
+            if state.end_date:
+                dates += f" to {state.end_date}"
+            parts.append(dates)
         if state.duration_days is not None:
             parts.append(f"Duration: {state.duration_days} day(s)")
         if state.budget is not None:
-            parts.append(f"Budget: ₹{state.budget}")
+            parts.append(f"Budget: {state.budget:g} {state.currency or ''}".rstrip())
+        elif state.currency:
+            parts.append(f"Currency for costs: {state.currency}")
         if state.preferences:
             parts.append(f"Preferences: {', '.join(state.preferences)}")
         if state.interests:
             parts.append(f"Interests: {', '.join(state.interests)}")
-        if state.goal:
-            parts.append(f"Goal: {state.goal}")
+        return parts
+
+    @staticmethod
+    def get_conversation_summary(state: PlanState) -> str:
+        """Build a text summary of the current state for LLM context."""
+        parts = StateManager._context_lines(state)
         if state.current_plan:
             parts.append(f"Has existing plan: Yes (replan #{state.replan_count})")
 
-        # Recent conversation (last 4 messages)
-        if state.conversation_history:
-            recent = state.conversation_history[-4:]
+        # Recent conversation (previous 4 messages, excluding the newest one)
+        history = state.conversation_history[:-1][-4:]
+        if history:
             conv_lines = []
-            for msg in recent:
+            for msg in history:
                 prefix = "User" if msg.role == "user" else "Assistant"
-                content_preview = msg.content[:150]
-                conv_lines.append(f"  {prefix}: {content_preview}")
+                conv_lines.append(f"  {prefix}: {msg.content[:150]}")
             parts.append("Recent conversation:\n" + "\n".join(conv_lines))
 
         return "\n".join(parts) if parts else "No state information available."
@@ -221,35 +240,33 @@ class StateManager:
             parts.append(f"Goal: {state.goal}")
         if state.intent:
             parts.append(f"Intent: {state.intent}")
-        if state.location:
-            parts.append(f"Location: {state.location}")
-        if state.duration_days is not None:
-            parts.append(f"Duration: {state.duration_days} day(s)")
-        if state.budget is not None:
-            parts.append(f"Budget: ₹{state.budget}")
-        if state.preferences:
-            parts.append(f"Preferences: {', '.join(state.preferences)}")
-        if state.interests:
-            parts.append(f"Interests: {', '.join(state.interests)}")
+        parts.extend(StateManager._context_lines(state))
         return "\n".join(parts) if parts else "No constraints specified."
 
     @staticmethod
-    def get_retrieved_options_summary(state: PlanState) -> str:
+    def get_retrieved_options_summary(state: PlanState, per_domain: int = 10) -> str:
         """Build text summary of all retrieved tool results for LLM context."""
-        if not state.chosen_options:
-            return "No options retrieved yet."
+        if not any(state.chosen_options.values()):
+            return "No options retrieved (none available for this location)."
 
+        detail_keys = [
+            "type", "food", "area", "pricerange", "stars", "vegetarian",
+            "entrance_fee", "price", "departure", "destination", "leaveAt",
+            "arriveBy", "duration", "code", "opening_hours", "address",
+        ]
         parts = []
         for domain, records in state.chosen_options.items():
+            if not records:
+                continue
             parts.append(f"\n{domain.upper()} OPTIONS:")
-            for i, rec in enumerate(records[:10], 1):
+            for i, rec in enumerate(records[:per_domain], 1):
                 name = rec.get("name", "Unknown")
-                details_parts = []
-                for key in ["area", "pricerange", "food", "type", "stars",
-                            "entrance_fee", "price", "address"]:
-                    if key in rec and rec[key]:
-                        details_parts.append(f"{key}: {rec[key]}")
-                details_str = ", ".join(details_parts)
-                parts.append(f"  {i}. {name} ({details_str})")
+                details = [
+                    f"{key}: {rec[key]}" for key in detail_keys
+                    if rec.get(key) not in (None, "", "?")
+                ]
+                if rec.get("distance_km") is not None:
+                    details.append(f"{rec['distance_km']} km from centre")
+                parts.append(f"  {i}. {name} ({', '.join(details)})")
 
         return "\n".join(parts)

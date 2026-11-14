@@ -46,8 +46,10 @@ def verify_plan(plan: Plan, state: PlanState) -> ConstraintResult:
         for day in plan.days:
             for slot in day.slots:
                 for activity in slot.activities:
-                    # Skip study activities and transport (may be generic)
-                    if activity.type in ("study", "transport"):
+                    # Only real-world places need grounding
+                    if activity.type not in ("attraction", "restaurant", "hotel"):
+                        continue
+                    if activity.details.get("source") == "placeholder":
                         continue
                     activity_name = activity.name.lower().strip()
                     if activity_name and activity_name not in retrieved_names:
@@ -59,8 +61,8 @@ def verify_plan(plan: Plan, state: PlanState) -> ConstraintResult:
                         )
                         if not fuzzy_match:
                             warnings.append(
-                                f"'{activity.name}' was not found in retrieved "
-                                f"data (possible hallucination)"
+                                f"'{activity.name}' is an AI suggestion that was not "
+                                f"found in the retrieved map data - please verify it"
                             )
 
     # 3. Check plan structure
@@ -102,10 +104,11 @@ def verify_plan(plan: Plan, state: PlanState) -> ConstraintResult:
                         calculated_total += activity.estimated_cost
                         has_costs = True
 
-        if has_costs and abs(calculated_total - plan.estimated_total_cost) > 100:
+        tolerance = max(1.0, 0.02 * abs(plan.estimated_total_cost))
+        if has_costs and abs(calculated_total - plan.estimated_total_cost) > tolerance:
             warnings.append(
-                f"Plan total cost (₹{plan.estimated_total_cost:.0f}) differs "
-                f"significantly from sum of activities (₹{calculated_total:.0f})"
+                f"Plan total cost ({plan.estimated_total_cost:.0f}) differs "
+                f"significantly from sum of activities ({calculated_total:.0f})"
             )
 
     result = ConstraintResult(

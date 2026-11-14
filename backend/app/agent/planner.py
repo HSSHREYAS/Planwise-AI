@@ -2,7 +2,6 @@
 PlanWise AI - Planning Agent
 
 Core agent implementing the Python state machine.
-Based on Architecture doc Sections 28-29.
 
 State machine:
     RECEIVED → UNDERSTANDING → DECOMPOSING → EXECUTING →
@@ -10,423 +9,207 @@ State machine:
 
 Branches:
     MISSING_INFORMATION → WAITING_FOR_USER
-    CONSTRAINT_VIOLATION → REPLANNING → EXECUTING/PLANNING → VALIDATING
+    CONSTRAINT_VIOLATION → REPLANNING → VALIDATING
     ERROR → CONTROLLED_RECOVERY
+
+The LLM (a hosted, free-tier API) handles language: understanding the
+request, composing the plan and wording the answer. Everything that must
+be exact - locations, dates, budgets, grounding - is done in Python.
 """
 
-import json
 import logging
-from typing import List, Optional
+import re
+from datetime import date, timedelta
+from typing import Any, Dict, List, Optional
 
-from app.agent.prompts import (
-    clarification_prompt,
-    decomposition_prompt,
-    intent_prompt,
-    replanning_prompt,
-    response_prompt,
-    schedule_prompt,
-    search_results_prompt,
-    study_schedule_prompt,
-)
-from app.config import MAX_REPLAN_ATTEMPTS
-from app.llm.ollama_client import OllamaClient
+from app import money
+from app.agent import prompts
+from app.config import MAX_REPLAN_ATTEMPTS, MAX_TRIP_DAYS
+from app.geo import geocoder
+from app.geo.geocoder import Place
+from app.llm.client import LLMClient, get_llm_client
 from app.models.schemas import (
     AgentResponse,
     AgentStatus,
     ConstraintResult,
     IntentResult,
     Plan,
+    PlanActivity,
+    PlanDay,
     PlanState,
+    PlanTimeSlot,
     ResponseStatus,
     Task,
     TaskStatus,
-    ToolResult,
+    normalize_iso_date,
 )
 from app.state.manager import StateManager
+from app.tools import common as tool_common
 from app.tools.registry import execute_tool
 from app.validation.constraints import check_impossible_constraints, validate_plan
 from app.validation.verifier import verify_plan
 
 logger = logging.getLogger(__name__)
 
+SEARCH_INTENTS = ("hotel_search", "restaurant_search", "attraction_search", "transport_search")
+SCHEDULE_INTENTS = ("study_planning", "schedule_generation")
+PLANNING_INTENTS = ("trip_planning",) + SCHEDULE_INTENTS
+KNOWN_INTENTS = SEARCH_INTENTS + PLANNING_INTENTS + ("replanning", "general_query")
+
+SLOT_ORDER = ("morning", "afternoon", "evening")
+DEFAULT_SLOT_TIMES = {"morning": "09:30", "afternoon": "13:30", "evening": "18:30"}
+
+# Phrases that mean "where I am" rather than naming a place
+_NEAR_ME = re.compile(
+    r"\b(near\s*me|nearby|near\s*by|around\s+me|around\s+here|close\s+to\s+me|"
+    r"my\s+(current\s+)?location|where\s+i\s+am|near\s+here)\b",
+    re.IGNORECASE,
+)
+_NOT_A_PLACE = {
+    "me", "here", "nearby", "near me", "my location", "current location",
+    "my current location", "the area", "town", "the city", "the centre", "the center",
+    "today", "tomorrow", "tonight", "day", "days", "budget", "morning", "evening",
+    "january", "february", "march", "april", "may", "june", "july", "august",
+    "september", "october", "november", "december",
+}
+_FRUGAL_NOTICE = (
+    "Running on the free keyless AI endpoint (about one AI reply every 45 seconds). "
+    "Add a free GROQ_API_KEY or GEMINI_API_KEY to .env for instant, full AI answers."
+)
+
 
 class PlanningAgent:
     """
     Core planning agent with explicit state machine transitions.
 
-    The agent follows the Architecture doc's core algorithm:
-    understand → check missing → decompose → execute tools →
-    generate plan → validate → verify → respond
+    understand → resolve context → check missing → decompose →
+    execute tools → generate plan → validate → verify → respond
     """
 
-    def __init__(self, llm_client: Optional[OllamaClient] = None):
-        self.llm = llm_client or OllamaClient()
+    def __init__(self, llm_client: Optional[LLMClient] = None):
+        self.llm = llm_client or get_llm_client()
         self.state_manager = StateManager()
 
+    # ════════════════════════════════════════════════════════════
+    # Main entry point
+    # ════════════════════════════════════════════════════════════
+
     def handle_message(
-        self, message: str, state: PlanState
+        self,
+        message: str,
+        state: PlanState,
+        context: Optional[Dict[str, Any]] = None,
     ) -> AgentResponse:
         """
-        Main entry point. Processes a user message through the full
-        state machine and returns an AgentResponse.
-        """
-        logger.info(f"Processing message: '{message[:100]}...'")
+        Process a user message through the full state machine.
 
-        # Add user message to conversation history
+        Args:
+            message: The user's natural language message
+            state: Session state (mutated in place)
+            context: Optional UI context - location/lat/lon picked in the
+                search bar (or the user's current location) and travel dates
+        """
+        logger.info(f"Processing message: '{message[:100]}'")
+        context = context or {}
+
         state = self.state_manager.add_message(state, "user", message)
         state = self.state_manager.set_goal(state, message)
+        intent: Optional[IntentResult] = None
 
         try:
             # ─── UNDERSTANDING ───────────────────────────────────
             state = self.state_manager.set_status(state, AgentStatus.UNDERSTANDING)
             intent = self._understand(message, state)
-            state = self.state_manager.update_from_intent(state, intent)
 
-            # Check if this is a modification of existing plan
-            if intent.is_modification and state.current_plan:
-                return self._handle_replanning(state, intent)
+            previous_intent = state.intent
+            previous_place = dict(state.place) if state.place else None
+            had_plan = state.current_plan is not None
+
+            is_modification = bool(intent.is_modification and had_plan)
+            if intent.intent == "replanning":
+                is_modification = had_plan
+                if not had_plan:
+                    intent.intent = "trip_planning"
+
+            state = self.state_manager.update_from_intent(state, intent)
+            if is_modification and previous_intent in PLANNING_INTENTS:
+                # A change request keeps the kind of plan being worked on
+                state.intent = previous_intent
+
+            # ─── RESOLVE LOCATION / DATES / CURRENCY ─────────────
+            location_problem = self._resolve_location(state, intent, context, message)
+            self._resolve_dates(state, intent, context)
+            self._resolve_currency(state, intent, message)
+
+            if location_problem and (state.intent != "general_query" or is_modification):
+                return self._respond(
+                    state, ResponseStatus.CLARIFICATION_REQUIRED, location_problem, intent=intent
+                )
+
+            # ─── GENERAL CONVERSATION ────────────────────────────
+            if state.intent == "general_query" and not is_modification:
+                return self._handle_general(message, state, intent)
+
+            # ─── MODIFY EXISTING PLAN ────────────────────────────
+            if is_modification:
+                location_changed = (state.place or None) != previous_place and state.place is not None
+                return self._handle_replanning(state, intent, location_changed)
 
             # ─── CHECK MISSING INFO ──────────────────────────────
             missing = self._check_missing_info(state)
             if missing:
-                state = self.state_manager.set_status(
-                    state, AgentStatus.WAITING_FOR_USER
-                )
-                clarification_msg = self._generate_clarification(missing, state)
-                state = self.state_manager.add_message(
-                    state, "assistant", clarification_msg
-                )
-                return AgentResponse(
-                    session_id=state.session_id,
-                    status=ResponseStatus.CLARIFICATION_REQUIRED,
-                    message=clarification_msg,
+                state = self.state_manager.set_status(state, AgentStatus.WAITING_FOR_USER)
+                return self._respond(
+                    state,
+                    ResponseStatus.CLARIFICATION_REQUIRED,
+                    prompts.clarification_text(missing),
                     intent=intent,
                 )
 
-            # Check for impossible constraints early
             impossible_warnings = check_impossible_constraints(state)
 
             # ─── DECOMPOSING ─────────────────────────────────────
             state = self.state_manager.set_status(state, AgentStatus.DECOMPOSING)
-
-            if state.intent in ("study_planning", "schedule_generation"):
-                # Study planning doesn't need tool calls
-                tasks = []
-            else:
-                tasks = self._decompose(state)
-                state = self.state_manager.set_subtasks(state, tasks)
+            tasks = self._decompose(state)
+            state = self.state_manager.set_subtasks(state, tasks)
 
             # ─── EXECUTING (TOOL CALLS) ──────────────────────────
             if tasks:
                 state = self.state_manager.set_status(state, AgentStatus.EXECUTING)
+                state.tool_results = []
+                state.chosen_options = {}
                 state = self._execute_tools(tasks, state)
 
             # ─── DIRECT SEARCH RESULTS PATH ──────────────────────
-            # For single-domain searches (e.g., "find me hotels"),
-            # return results directly instead of forcing a schedule.
             if self._is_single_domain_search(state):
                 return self._handle_search_results(state, intent, impossible_warnings)
 
-            # ─── PLANNING ────────────────────────────────────────
-            state = self.state_manager.set_status(state, AgentStatus.PLANNING)
-            candidate_plan = self._generate_plan(state)
+            # ─── PLANNING → VALIDATING → VERIFYING ───────────────
+            return self._plan_and_respond(state, intent, impossible_warnings)
 
-            if candidate_plan is None:
-                state = self.state_manager.set_status(state, AgentStatus.ERROR)
-                error_msg = (
-                    "I wasn't able to generate a plan. This might be due to "
-                    "limited data for the requested location or preferences. "
-                    "Could you try with different criteria?"
-                )
-                state = self.state_manager.add_message(
-                    state, "assistant", error_msg
-                )
-                return AgentResponse(
-                    session_id=state.session_id,
-                    status=ResponseStatus.ERROR,
-                    message=error_msg,
-                    intent=intent,
-                )
-
-            # ─── VALIDATING ──────────────────────────────────────
-            state = self.state_manager.set_status(state, AgentStatus.VALIDATING)
-            validation = validate_plan(candidate_plan, state)
-
-            # If validation fails, attempt replanning
-            replan_attempts = 0
-            while not validation.valid and replan_attempts < MAX_REPLAN_ATTEMPTS:
-                replan_attempts += 1
-                state = self.state_manager.set_status(
-                    state, AgentStatus.REPLANNING
-                )
-                state = self.state_manager.set_violations(
-                    state, validation.violations
-                )
-                logger.info(
-                    f"Replanning attempt {replan_attempts}: {validation.violations}"
-                )
-                candidate_plan = self._replan(state, validation.violations)
-                if candidate_plan is None:
-                    break
-                validation = validate_plan(candidate_plan, state)
-
-            # If still invalid after replanning
-            if not validation.valid:
-                msg = self._explain_constraint_failure(state, validation)
-                state = self.state_manager.add_message(state, "assistant", msg)
-                return AgentResponse(
-                    session_id=state.session_id,
-                    status=ResponseStatus.CONSTRAINT_FAILURE,
-                    message=msg,
-                    validation=validation,
-                    plan=candidate_plan,
-                    intent=intent,
-                )
-
-            # ─── VERIFYING ───────────────────────────────────────
-            state = self.state_manager.set_status(state, AgentStatus.VERIFYING)
-            verification = verify_plan(candidate_plan, state)
-
-            # Verification warnings are non-blocking but logged
-            if verification.warnings:
-                logger.info(f"Verification warnings: {verification.warnings}")
-
-            # ─── COMPLETED ───────────────────────────────────────
-            state = self.state_manager.set_status(state, AgentStatus.COMPLETED)
-            state = self.state_manager.update_plan(state, candidate_plan)
-
-            # Generate final response
-            response_text = self._generate_response(candidate_plan, state)
-
-            # Merge warnings from validation and verification
-            all_warnings = validation.warnings + verification.warnings
-            if impossible_warnings:
-                all_warnings.extend(impossible_warnings)
-
-            final_validation = ConstraintResult(
-                valid=True,
-                violations=[],
-                warnings=all_warnings,
-            )
-
-            state = self.state_manager.add_message(
-                state, "assistant", response_text
-            )
-
-            return AgentResponse(
-                session_id=state.session_id,
-                status=ResponseStatus.COMPLETED,
-                message=response_text,
-                plan=candidate_plan,
-                validation=final_validation,
-                intent=intent,
-            )
-
-        except ConnectionError as e:
-            logger.error(f"LLM connection error: {e}")
-            error_msg = (
-                "I'm unable to connect to the AI model right now. "
-                "Please make sure Ollama is running and try again."
-            )
-            return AgentResponse(
-                session_id=state.session_id,
-                status=ResponseStatus.ERROR,
-                message=error_msg,
-            )
         except Exception as e:
             logger.error(f"Unexpected agent error: {e}", exc_info=True)
-            error_msg = (
+            state = self.state_manager.set_status(state, AgentStatus.ERROR)
+            return self._respond(
+                state,
+                ResponseStatus.ERROR,
                 "Something went wrong while processing your request. "
-                "Please try again or rephrase your request."
-            )
-            return AgentResponse(
-                session_id=state.session_id,
-                status=ResponseStatus.ERROR,
-                message=error_msg,
-            )
-
-    def _handle_replanning(
-        self, state: PlanState, intent: IntentResult
-    ) -> AgentResponse:
-        """Handle explicit replanning when user modifies requirements."""
-        logger.info("Handling replanning request")
-
-        # Apply changes from intent
-        if intent.raw_changes:
-            state = self.state_manager.apply_changes(state, intent.raw_changes)
-        if intent.budget is not None:
-            state.budget = intent.budget
-        if intent.duration_days is not None:
-            state.duration_days = intent.duration_days
-        if intent.preferences:
-            for p in intent.preferences:
-                if p.lower() not in [x.lower() for x in state.preferences]:
-                    state.preferences.append(p.lower())
-
-        # May need to re-run tools if location changed
-        needs_new_retrieval = (
-            intent.location and intent.location != state.location
-        )
-        if needs_new_retrieval and intent.location:
-            state.location = intent.location
-            state.tool_results = []
-            state.chosen_options = {}
-            tasks = self._decompose(state)
-            state = self._execute_tools(tasks, state)
-
-        # Generate revised plan
-        state = self.state_manager.set_status(state, AgentStatus.REPLANNING)
-        candidate_plan = self._generate_plan(state)
-
-        if candidate_plan is None:
-            msg = "I couldn't generate a revised plan with the new constraints."
-            state = self.state_manager.add_message(state, "assistant", msg)
-            return AgentResponse(
-                session_id=state.session_id,
-                status=ResponseStatus.ERROR,
-                message=msg,
-            )
-
-        # Validate
-        validation = validate_plan(candidate_plan, state)
-        replan_attempts = 0
-        while not validation.valid and replan_attempts < MAX_REPLAN_ATTEMPTS:
-            replan_attempts += 1
-            candidate_plan = self._replan(state, validation.violations)
-            if candidate_plan is None:
-                break
-            validation = validate_plan(candidate_plan, state)
-
-        if not validation.valid:
-            msg = self._explain_constraint_failure(state, validation)
-            state = self.state_manager.add_message(state, "assistant", msg)
-            return AgentResponse(
-                session_id=state.session_id,
-                status=ResponseStatus.CONSTRAINT_FAILURE,
-                message=msg,
-                validation=validation,
-                plan=candidate_plan,
+                "Please try again or rephrase your request.",
                 intent=intent,
             )
 
-        # Verify and complete
-        verification = verify_plan(candidate_plan, state)
-        state = self.state_manager.update_plan(state, candidate_plan)
-        state = self.state_manager.set_status(state, AgentStatus.COMPLETED)
-
-        response_text = self._generate_response(candidate_plan, state)
-        state = self.state_manager.add_message(state, "assistant", response_text)
-
-        return AgentResponse(
-            session_id=state.session_id,
-            status=ResponseStatus.COMPLETED,
-            message=response_text,
-            plan=candidate_plan,
-            validation=ConstraintResult(
-                valid=True,
-                violations=[],
-                warnings=validation.warnings + verification.warnings,
-            ),
-            intent=intent,
-        )
-
-    # ── Single-domain search helpers ─────────────────────────────
-
-    def _is_single_domain_search(self, state: PlanState) -> bool:
-        """Check if this is a single-domain search (not trip planning)."""
-        return state.intent in (
-            "hotel_search", "restaurant_search",
-            "attraction_search", "transport_search",
-        )
-
-    def _handle_search_results(
-        self, state: PlanState, intent: IntentResult, warnings: List[str]
-    ) -> AgentResponse:
-        """Handle single-domain search by returning results directly."""
-        state = self.state_manager.set_status(state, AgentStatus.COMPLETED)
-
-        # Gather results from tools
-        all_results = []
-        domain = state.intent.replace("_search", "")
-        for tr in state.tool_results:
-            if tr.success and tr.results:
-                all_results.extend(tr.results)
-
-        if not all_results:
-            # Check chosen_options as fallback
-            all_results = state.chosen_options.get(domain, [])
-
-        if not all_results:
-            msg = (
-                f"I couldn't find any {domain} options matching your criteria. "
-                f"The data covers Cambridge, UK. Try adjusting your preferences "
-                f"or area (e.g., centre, north, south, east, west)."
-            )
-            state = self.state_manager.add_message(state, "assistant", msg)
-            return AgentResponse(
-                session_id=state.session_id,
-                status=ResponseStatus.COMPLETED,
-                message=msg,
-                intent=intent,
-            )
-
-        # Format results using LLM or fallback
-        options_summary = self.state_manager.get_retrieved_options_summary(state)
-        prompt = search_results_prompt(domain, options_summary, state.goal or "")
-
-        try:
-            response_text = self.llm.generate(
-                prompt=prompt,
-                system="You are a helpful planning assistant. Present search results clearly.",
-                temperature=0.5,
-            )
-        except Exception:
-            # Fallback: format results directly
-            response_text = self._format_search_results(domain, all_results)
-
-        state = self.state_manager.add_message(state, "assistant", response_text)
-
-        return AgentResponse(
-            session_id=state.session_id,
-            status=ResponseStatus.COMPLETED,
-            message=response_text,
-            intent=intent,
-            validation=ConstraintResult(
-                valid=True, violations=[], warnings=warnings,
-            ),
-        )
-
-    def _format_search_results(
-        self, domain: str, results: List[dict]
-    ) -> str:
-        """Fallback formatting for single-domain search results."""
-        domain_emoji = {
-            "hotel": "🏨", "restaurant": "🍽️",
-            "attraction": "🎯", "transport": "🚂",
-        }
-        emoji = domain_emoji.get(domain, "📋")
-        lines = [f"{emoji} **{domain.capitalize()} Options Found:**\n"]
-
-        for i, rec in enumerate(results[:8], 1):
-            name = rec.get("name", "Unknown")
-            parts = []
-            for key in ["area", "pricerange", "food", "type", "stars",
-                        "entrance_fee", "price", "address", "phone"]:
-                val = rec.get(key)
-                if val:
-                    parts.append(f"{key}: {val}")
-            details = " | ".join(parts)
-            lines.append(f"{i}. **{name}** — {details}")
-
-        lines.append(f"\n_Data from MultiWOZ 2.2 (Cambridge, UK)_")
-        return "\n".join(lines)
-
-    # ── State Machine Steps ─────────────────────────────────────
+    # ════════════════════════════════════════════════════════════
+    # Understanding
+    # ════════════════════════════════════════════════════════════
 
     def _understand(self, message: str, state: PlanState) -> IntentResult:
-        """UNDERSTANDING state: Extract intent and parameters."""
+        """UNDERSTANDING state: extract intent and parameters."""
+        if self.llm.frugal:
+            # One AI reply per ~45s on the keyless endpoint: keep it for the answer
+            return self._fallback_intent(message, state)
+
         conversation_summary = self.state_manager.get_conversation_summary(state)
-        prompt = intent_prompt(message, conversation_summary)
+        prompt = prompts.intent_prompt(message, conversation_summary)
 
         try:
             result = self.llm.generate_structured(
@@ -434,485 +217,1232 @@ class PlanningAgent:
                 schema=IntentResult,
                 system="You are a planning intent extraction system. Respond with JSON only.",
             )
-            logger.info(f"Intent extracted: {result.intent}")
-            return result
-        except RuntimeError:
-            # Fallback: basic intent detection
-            logger.warning("LLM structured output failed, using fallback intent")
+        except Exception as e:  # LLM down, rate limited or returned junk
+            logger.warning(f"LLM intent extraction failed, using rules: {str(e)[:120]}")
             return self._fallback_intent(message, state)
 
+        if result.intent not in KNOWN_INTENTS:
+            result.intent = self._fallback_intent(message, state).intent
+        if result.location and not self._looks_like_place(result.location):
+            result.location = None
+        logger.info(f"Intent extracted: {result.intent} (location={result.location})")
+        return result
+
+    @staticmethod
+    def _looks_like_place(text: str) -> bool:
+        cleaned = text.strip().lower().strip(".,!?")
+        if not cleaned or cleaned in _NOT_A_PLACE or _NEAR_ME.search(cleaned):
+            return False
+        if tool_common.strip_area_words(cleaned).lower() in tool_common.LOCAL_AREAS:
+            return False
+        return len(cleaned) >= 2 and not cleaned.isdigit()
+
     def _fallback_intent(self, message: str, state: PlanState) -> IntentResult:
-        """Fallback intent detection when LLM structured output fails."""
+        """Rule-based intent detection (used when the LLM is unavailable)."""
         msg_lower = message.lower()
 
+        def has(*words: str) -> bool:
+            return any(re.search(rf"\b{re.escape(w)}", msg_lower) for w in words)
+
         intent = "general_query"
-        is_mod = False
-
-        if any(w in msg_lower for w in ["hotel", "stay", "accommodation", "guesthouse", "b&b"]):
-            intent = "hotel_search"
-        elif any(w in msg_lower for w in ["restaurant", "food", "eat", "dining", "lunch", "dinner"]):
-            intent = "restaurant_search"
-        elif any(w in msg_lower for w in ["attraction", "visit", "see", "place", "museum", "park"]):
-            intent = "attraction_search"
-        elif any(w in msg_lower for w in ["train", "taxi", "transport", "travel"]):
-            intent = "transport_search"
-        elif any(w in msg_lower for w in ["study", "exam", "subject", "learn"]):
+        asks_advice = bool(re.search(
+            r"\b(best time|when (should|to|is)|what time of year|weather|climate|how (do|to|much|many|long|far|safe)|"
+            r"is it (safe|worth|expensive)|what (should i|to) (pack|wear|carry)|tips|advice|visa|"
+            r"tell me about|what is|who is|why)\b", msg_lower,
+        )) and not has("find", "show", "list", "search", "recommend", "suggest", "plan", "itinerary")
+        if asks_advice:
+            pass
+        elif has("study", "exam", "revision", "revise", "syllabus", "homework") or (
+            has("schedule", "timetable", "routine") and not has("trip", "travel", "itinerary")
+        ):
             intent = "study_planning"
-        elif any(w in msg_lower for w in ["trip", "plan", "itinerary", "schedule", "day"]):
+        elif (
+            has("itinerary", "trip", "tour", "getaway", "vacation", "holiday")
+            or (has("plan") and has("day", "weekend", "visit", "travel"))
+        ):
             intent = "trip_planning"
+        elif has("hotel", "stay", "accommodation", "guesthouse", "guest house", "hostel", "b&b", "lodge", "resort"):
+            intent = "hotel_search"
+        elif has("restaurant", "food", "eat", "dining", "dine", "lunch", "dinner", "breakfast", "cafe", "pub", "cuisine"):
+            intent = "restaurant_search"
+        elif has("train", "taxi", "transport", "bus", "airport", "flight", "railway", "metro", "station"):
+            intent = "transport_search"
+        elif has("attraction", "visit", "see", "sight", "museum", "park", "temple", "things to do",
+                 "places", "landmark", "monument", "palace", "fort", "beach", "explore"):
+            intent = "attraction_search"
+        elif re.search(r"\b\d+\s*[- ]?\s*days?\b", msg_lower):
+            intent = "trip_planning"  # "3 days in Goa"
 
-        # Check if modification
-        if any(w in msg_lower for w in ["change", "reduce", "increase", "modify",
-                                         "update", "instead", "actually"]):
+        # Modification of an existing plan
+        is_mod = False
+        if has("change", "reduce", "increase", "modify", "update", "instead", "actually",
+               "make it", "add ", "remove", "replace", "swap", "cheaper", "extend", "shorten"):
             is_mod = state.current_plan is not None
 
-        # Extract location
-        location = None
-        if "cambridge" in msg_lower:
-            location = "cambridge"
-        elif "london" in msg_lower:
-            location = "london"
-        elif state.location:
-            location = state.location
+        location = self._extract_location(message)
 
-        # Extract budget: MUST have budget keywords or explicit currency symbol
-        # Prevents "2 day" or "Day 1" from being captured as budget
+        # Budget: needs a budget keyword or an explicit currency marker, so
+        # "2 day" or "Day 1" is never captured as a budget
         budget = None
-        import re
         budget_match = re.search(
-            r'(?:[₹$£]|(?:budget|cost|spend|price|under|max)\s*(?:of|is|around|about)?\s*[₹$£]?)\s*(\d[\d,]*)',
+            r"(?:[₹$£€]\s*|(?:budget|cost|spend|price|under|max|within|below)\s*"
+            r"(?:of|is|to|around|about)?\s*(?:rs\.?|inr|usd|gbp|eur)?\s*[₹$£€]?\s*)(\d[\d,]*(?:\.\d+)?)(?![\d,.:])"
+            r"\s*(k\b)?(?!\s*[- ]?(?:days?|nights?|hours?|hrs?|km|stars?|people|persons?|pm|am)\b)",
             message,
             re.IGNORECASE,
         )
         if not budget_match:
             budget_match = re.search(
-                r'(\d[\d,]*)\s*(?:rupees|inr|rs|dollars|pounds|bucks)',
+                r"(\d[\d,]*(?:\.\d+)?)\s*(k\b)?\s*(?:rupees|inr|rs\b|dollars|usd|pounds|gbp|euros?|eur|bucks)",
                 message,
                 re.IGNORECASE,
             )
         if budget_match:
             try:
                 budget = float(budget_match.group(1).replace(",", ""))
+                if budget_match.group(2):
+                    budget *= 1000
             except ValueError:
                 budget = None
 
-        # Extract duration (supports "3 days", "3-day", "3day", "weekend", etc.)
+        # Duration ("3 days", "3-day", "weekend", "a week" ...)
         duration = None
-        duration_match = re.search(r'(\d+)\s*[-_]?\s*(?:day|days)', msg_lower)
+        duration_match = re.search(r"(\d+)\s*[-_ ]?\s*days?\b", msg_lower)
+        words = {"one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6, "seven": 7}
+        word_match = re.search(r"\b(one|two|three|four|five|six|seven)[\s-]days?\b", msg_lower)
         if duration_match:
             duration = int(duration_match.group(1))
+        elif word_match:
+            duration = words[word_match.group(1)]
         elif "weekend" in msg_lower:
             duration = 2
-        elif "one day" in msg_lower or "1 day" in msg_lower or "1-day" in msg_lower:
+        elif re.search(r"\b(a|one|1)\s+week\b", msg_lower):
+            duration = 7
+        elif re.search(r"\b(day\s*trip|today|tomorrow)\b", msg_lower) and intent == "trip_planning":
             duration = 1
-        elif "two days" in msg_lower or "2 days" in msg_lower or "2-day" in msg_lower:
-            duration = 2
-        elif "three days" in msg_lower or "3 days" in msg_lower or "3-day" in msg_lower:
-            duration = 3
-        elif state.duration_days:
-            duration = state.duration_days
 
-        # Extract preferences
+        # Dates written as YYYY-MM-DD
+        iso_dates = [normalize_iso_date(d) for d in re.findall(r"\b\d{4}-\d{2}-\d{2}\b", message)]
+        iso_dates = [d for d in iso_dates if d]
+        start_date = iso_dates[0] if iso_dates else None
+        end_date = iso_dates[1] if len(iso_dates) > 1 else None
+        if not start_date:
+            if re.search(r"\btomorrow\b", msg_lower):
+                start_date = (date.today() + timedelta(days=1)).isoformat()
+            elif re.search(r"\b(today|tonight)\b", msg_lower):
+                start_date = date.today().isoformat()
+
         preferences = []
-        if "vegetarian" in msg_lower or "veg" in msg_lower:
+        pref_words = [
+            "vegetarian", "vegan", "cheap", "budget-friendly", "luxury", "wifi", "parking",
+            "family", "romantic", "halal", "gluten-free", "hostel", "resort", "cafe", "pub",
+        ] + [
+            "indian", "chinese", "italian", "thai", "japanese", "mexican", "french",
+            "korean", "mediterranean", "seafood", "pizza", "sushi", "biryani",
+        ]
+        for word in pref_words:
+            if re.search(rf"\b{re.escape(word)}\b", msg_lower):
+                preferences.append(word)
+        if re.search(r"\bveg\b", msg_lower) and "vegetarian" not in preferences:
             preferences.append("vegetarian")
+        if re.search(r"\b(budget|affordable|inexpensive|low[- ]cost)\b", msg_lower) and budget is None \
+                and "cheap" not in preferences:
+            preferences.append("cheap")
+        star_match = re.search(r"\b([3-5])[- ]?star", msg_lower)
+        if star_match:
+            preferences.append(f"{star_match.group(1)}-star")
+
+        interests = []
+        for word in ["museum", "history", "historic", "nature", "park", "temple", "art", "culture",
+                     "shopping", "architecture", "beach", "nightlife", "religious", "family", "free",
+                     "college", "church", "palace", "fort", "wildlife", "adventure"]:
+            if re.search(rf"\b{word}s?\b", msg_lower):
+                interests.append(word)
+
+        raw_changes: Dict[str, Any] = {}
+        if is_mod:
+            if budget is not None:
+                raw_changes["budget"] = budget
+            if duration is not None:
+                raw_changes["duration_days"] = duration
 
         return IntentResult(
             intent=intent,
             location=location,
             budget=budget,
             duration_days=duration,
+            start_date=start_date,
+            end_date=end_date,
+            currency=money.detect_currency(message),
             preferences=preferences,
+            interests=interests,
             is_modification=is_mod,
+            raw_changes=raw_changes or None,
         )
 
-    def _check_missing_info(self, state: PlanState) -> Optional[List[str]]:
-        """Check if essential info is missing for planning/search."""
-        missing = []
+    def _extract_location(self, message: str) -> Optional[str]:
+        """Find a place name in free text without an LLM."""
+        if "cambridge" in message.lower():
+            return "cambridge"
 
-        # Trip planning needs both location and duration
+        stop = r"(?=\s+(?:for|with|under|on|from|next|this|during|and|in\s+\d|within|that|which|having|" \
+               r"before|after|arriving|leaving|at\s+\d|between|by|budget|to\s+\w+\s+for)\b|[,.!?;:]|$)"
+
+        # "... in Paris", "trip to New Delhi", "near Mysuru Palace" (capitalised names)
+        match = re.search(
+            r"\b(?:in|to|at|near|around|of|visit|visiting|explore|exploring)\s+"
+            r"((?:[A-Z][\w'’.-]*)(?:\s+(?:[A-Z][\w'’.-]*|de|del|la|el|of|the|di|da)){0,4})",
+            message,
+        )
+        candidate = match.group(1).strip() if match else None
+
+        # lower-case typing: "trip to goa for 3 days"
+        if not candidate:
+            match = re.search(
+                r"\b(?:trip|travel|go|going|visit|itinerary|tour|hotels?|stays?|restaurants?|food|eat|"
+                r"attractions?|places|sights?|things to do|museums?|parks?|trains?|transport|plan)\s+"
+                r"(?:to|in|at|near|around|for)\s+(?:the\s+city\s+of\s+)?([a-z][a-z .'’-]{1,40}?)" + stop,
+                message.lower(),
+            )
+            candidate = match.group(1).strip() if match else None
+
+        if not candidate:
+            return None
+        candidate = re.sub(r"\s+", " ", candidate).strip(" .,'")
+        candidate = re.sub(r"^(the|a|an)\s+", "", candidate, flags=re.IGNORECASE)
+        if not self._looks_like_place(candidate):
+            return None
+        return candidate.lower()
+
+    # ════════════════════════════════════════════════════════════
+    # Context resolution (location, dates, currency)
+    # ════════════════════════════════════════════════════════════
+
+    def _resolve_location(
+        self,
+        state: PlanState,
+        intent: IntentResult,
+        context: Dict[str, Any],
+        message: str,
+    ) -> Optional[str]:
+        """
+        Decide which place this request is about and geocode it.
+
+        Priority:
+          1. a place named in the message
+          2. the place picked in the UI (search bar / location chip / GPS)
+          3. the place already established in this session
+
+        Returns a clarification message if a named place cannot be located.
+        """
+        ctx_location = (context.get("location") or "").strip() or None
+        ctx_lat, ctx_lon = context.get("lat"), context.get("lon")
+        ctx_has_coords = ctx_lat is not None and ctx_lon is not None
+
+        named = intent.location if intent.location and self._looks_like_place(intent.location) else None
+        wants_here = bool(_NEAR_ME.search(message))
+
+        # 1. Place named in the message (unless it is the place we already have)
+        if named and not (wants_here and ctx_has_coords):
+            if state.place and self._same_place_name(named, state.place):
+                state.location = state.place.get("label") or state.place.get("name")
+                return None
+            if ctx_has_coords and ctx_location and self._same_place_name(named, {"name": ctx_location}):
+                self._set_place(state, self._place_from_context(ctx_location, ctx_lat, ctx_lon))
+                return None
+
+            query = tool_common.strip_area_words(named)
+            place = geocoder.geocode(query)
+            if place is not None:
+                self._set_place(state, place)
+                if tool_common.local_area(named) and geocoder.is_cambridge_uk(place):
+                    state.location = named  # keep "centre of cambridge" for area filtering
+                return None
+            if geocoder.service_ok():
+                state.location = state.place.get("label") if state.place else None
+                return (
+                    f"I couldn't find **{named.title()}** on the map. Could you check the spelling, "
+                    f"or add the region or country (for example \"Springfield, Illinois\")?"
+                )
+            # Map service is down: keep the name, answers fall back to AI knowledge
+            state.location = named.title()
+            state.place = None
+            return None
+
+        # 2. Place supplied by the UI
+        if ctx_has_coords or ctx_location:
+            if ctx_has_coords:
+                place = self._place_from_context(ctx_location, ctx_lat, ctx_lon)
+            else:
+                place = geocoder.geocode(ctx_location)
+            if place is not None:
+                explicit = bool(context.get("explicit")) or wants_here
+                if explicit or not state.place:
+                    self._set_place(state, place)
+                return None
+
+        # 3. Keep whatever the session already has
+        if state.place:
+            state.location = state.place.get("label") or state.place.get("name")
+        return None
+
+    @staticmethod
+    def _same_place_name(name: str, place: Dict[str, Any]) -> bool:
+        wanted = tool_common.strip_area_words(name).strip().lower()
+        known = str(place.get("name") or "").strip().lower()
+        label = str(place.get("label") or "").strip().lower()
+        if not wanted or not known:
+            return False
+        return wanted == known or wanted == label or wanted == known.split(",")[0].strip()
+
+    @staticmethod
+    def _place_from_context(location: Optional[str], lat: float, lon: float) -> Place:
+        place = geocoder.lookup(lat, lon) or geocoder.reverse(lat, lon)
+        if place is None:  # map service unreachable: trust the coordinates
+            return Place(name=location or "Selected location", lat=float(lat), lon=float(lon))
+        if location:
+            short = location.split(",")[0].strip()
+            if short and short.lower() != place.name.lower() and place.kind != "current_location":
+                place = place.model_copy(update={"name": short})
+        return place
+
+    @staticmethod
+    def _set_place(state: PlanState, place: Place) -> None:
+        data = place.model_dump()
+        data["label"] = place.label
+        if state.place and (
+            round(state.place.get("lat", 0), 3) != round(place.lat, 3)
+            or round(state.place.get("lon", 0), 3) != round(place.lon, 3)
+        ):
+            logger.info(f"Location changed: {state.place.get('label')} → {place.label}")
+            state.tool_results = []
+            state.chosen_options = {}
+        state.place = data
+        state.location = place.label
+
+    def _resolve_dates(self, state: PlanState, intent: IntentResult, context: Dict[str, Any]) -> None:
+        """Merge dates from the message and the UI; keep duration consistent."""
+        ctx_start = normalize_iso_date(context.get("start_date"))
+        ctx_end = normalize_iso_date(context.get("end_date"))
+
+        start = intent.start_date or ctx_start
+        end = intent.end_date or ctx_end
+        message_duration = intent.duration_days
+
+        if start:
+            state.start_date = start
+        if end:
+            state.end_date = end
+
+        if state.start_date and state.end_date:
+            first, last = date.fromisoformat(state.start_date), date.fromisoformat(state.end_date)
+            if last < first:
+                first, last = last, first
+            if message_duration and not intent.end_date:
+                # "3 days starting 12 Dec" - the stated length wins over the UI range
+                last = first + timedelta(days=message_duration - 1)
+            span = (last - first).days + 1
+            if span > MAX_TRIP_DAYS:
+                span = MAX_TRIP_DAYS
+                last = first + timedelta(days=span - 1)
+            state.start_date, state.end_date = first.isoformat(), last.isoformat()
+            if start or end or message_duration:
+                state.duration_days = span
+        elif state.start_date and state.duration_days:
+            first = date.fromisoformat(state.start_date)
+            state.end_date = (first + timedelta(days=state.duration_days - 1)).isoformat()
+
+        if state.duration_days is not None:
+            state.duration_days = max(1, min(int(state.duration_days), MAX_TRIP_DAYS))
+            if state.start_date:
+                first = date.fromisoformat(state.start_date)
+                state.end_date = (first + timedelta(days=state.duration_days - 1)).isoformat()
+
+        if state.start_date and state.end_date:
+            state.dates = f"{state.start_date} to {state.end_date}"
+
+    def _resolve_currency(self, state: PlanState, intent: IntentResult, message: str) -> None:
+        explicit = intent.currency or money.detect_currency(message)
+        if explicit:
+            state.currency = explicit
+            return
+        if state.budget is not None and state.currency:
+            return  # keep the currency the budget was stated in
+        if state.place and state.place.get("country_code"):
+            state.currency = money.currency_for_country(state.place["country_code"])
+        elif not state.currency and state.location and "cambridge" in state.location.lower():
+            state.currency = "GBP"
+
+    # ════════════════════════════════════════════════════════════
+    # General conversation
+    # ════════════════════════════════════════════════════════════
+
+    def _handle_general(self, message: str, state: PlanState, intent: IntentResult) -> AgentResponse:
+        state = self.state_manager.set_status(state, AgentStatus.COMPLETED)
+        history = [
+            {"role": m.role if m.role in ("user", "assistant") else "user", "content": m.content[:600]}
+            for m in state.conversation_history[-7:-1]
+        ]
+        try:
+            text = self.llm.generate(
+                prompt=prompts.general_prompt(message, self.state_manager.get_state_summary(state)),
+                system=prompts.SYSTEM_ASSISTANT,
+                temperature=0.5,
+                max_tokens=700,
+                history=history,
+            )
+            return self._respond(state, ResponseStatus.COMPLETED, text, intent=intent)
+        except Exception as e:
+            logger.warning(f"General answer failed: {str(e)[:120]}")
+            where = f" in **{state.location}**" if state.location else ""
+            text = (
+                "The AI model is busy right now, so I can't write a full answer to that - "
+                "but live search and planning still work. Try one of these:\n\n"
+                f"- \"Find vegetarian restaurants{where}\"\n"
+                f"- \"Top attractions{where}\"\n"
+                f"- \"Plan a 2-day trip{where or ' to Jaipur'}\"\n"
+                "- \"Create a 3-day study schedule for maths and physics\""
+            )
+            return self._respond(
+                state, ResponseStatus.COMPLETED, text, intent=intent,
+                notice=_FRUGAL_NOTICE if self.llm.frugal else None,
+            )
+
+    # ════════════════════════════════════════════════════════════
+    # Missing info, decomposition, tool execution
+    # ════════════════════════════════════════════════════════════
+
+    def _check_missing_info(self, state: PlanState) -> Optional[List[str]]:
+        """Essential information that must be known before planning/searching."""
+        missing = []
         if state.intent == "trip_planning":
             if not state.location:
-                missing.append("location/destination")
+                missing.append("location")
             if not state.duration_days:
-                missing.append("number of days")
-
-        # Single-domain searches need at least a location or some filter
-        elif state.intent in (
-            "hotel_search", "restaurant_search",
-            "attraction_search", "transport_search",
-        ):
-            # For domain searches, location helps a lot but isn't strictly
-            # required — MultiWOZ data is all Cambridge so we can default.
-            # Only ask for clarification if the query is extremely vague
-            # (no location AND no preferences AND no interests).
-            if (
-                not state.location
-                and not state.preferences
-                and not state.interests
-                and not state.budget
-            ):
-                # Default to Cambridge since that's what MultiWOZ covers
-                state.location = "cambridge"
-                logger.info("Defaulting location to Cambridge (MultiWOZ dataset)")
-
-        return missing if missing else None
+                missing.append("duration")
+        elif state.intent in SEARCH_INTENTS:
+            if not state.location:
+                missing.append("location")
+        return missing or None
 
     def _decompose(self, state: PlanState) -> List[Task]:
-        """DECOMPOSING state: Break goal into subtasks."""
-        location = state.location or "cambridge"
+        """DECOMPOSING state: deterministic mapping from intent to tool calls."""
+        location = state.location
+        place = state.place
+        level = tool_common.price_level(None, state.preferences)
 
-        # Deterministic mapping for single-domain searches (no LLM hallucinations)
+        # The bundled Cambridge dataset is organised by area (centre, north ...)
+        if place and geocoder.is_cambridge_uk(Place.model_validate(place)):
+            area = tool_common.local_area(state.goal or "")
+            if area:
+                location = f"{area} of Cambridge"
+
+        def task(tool: str, **params: Any) -> Task:
+            return Task(task_type=tool, parameters={"location": location, "place": place, **params})
+
         if state.intent == "hotel_search":
-            return [Task(task_type="hotel_search", parameters={"location": location, "budget": state.budget, "preferences": state.preferences})]
+            return [task("hotel_search", budget=level, preferences=state.preferences)]
         if state.intent == "restaurant_search":
-            return [Task(task_type="restaurant_search", parameters={"location": location, "budget": state.budget, "preferences": state.preferences})]
+            return [task("restaurant_search", budget=level, preferences=state.preferences)]
         if state.intent == "attraction_search":
-            return [Task(task_type="attraction_search", parameters={"location": location, "interests": state.interests})]
+            return [task("attraction_search", interests=state.interests)]
         if state.intent == "transport_search":
-            return [Task(task_type="transport_search", parameters={"location": location})]
-
-        state_summary = self.state_manager.get_state_summary(state)
-        prompt = decomposition_prompt(state_summary)
-
-        try:
-            raw_response = self.llm.generate(
-                prompt=prompt,
-                system="You are a task decomposition system. Respond with JSON only.",
-                temperature=0.1,
+            route = re.search(
+                r"\bfrom\s+(.+?)\s+to\s+(.+?)(?=\s+(?:arriving|leaving|departing|on|at|before|after|by|for)\b|[,.?!]|$)",
+                state.goal or "", re.IGNORECASE,
             )
-            parsed = self.llm._extract_json(raw_response)
-            tasks_data = parsed.get("tasks", [])
-        except Exception as e:
-            logger.warning(f"LLM decomposition failed, using fallback: {e}")
-            tasks_data = self._fallback_decompose(state)
+            source = route.group(1).strip().lower() if route else None
+            destination = route.group(2).strip().lower() if route else None
+            if "cambridge" in f"{source} {destination}" or "cambridge" in (state.goal or "").lower():
+                # Train timetables exist only in the bundled Cambridge dataset
+                return [Task(task_type="transport_search", parameters={
+                    "location": "cambridge", "source": source, "destination": destination,
+                })]
+            return [task("transport_search")]
+        if state.intent == "trip_planning":
+            tasks = [
+                task("attraction_search", interests=state.interests),
+                task("restaurant_search", budget=level, preferences=state.preferences),
+            ]
+            if (state.duration_days or 1) > 1:
+                tasks.append(task("hotel_search", budget=level, preferences=state.preferences))
+            return tasks
+        return []  # study / schedule plans need no tools
 
-        # Convert to Task objects
-        tasks = []
-        task_type_to_tool = {
-            "search_hotels": "hotel_search",
-            "search_restaurants": "restaurant_search",
-            "search_attractions": "attraction_search",
-            "search_transport": "transport_search",
-            "hotel_search": "hotel_search",
-            "restaurant_search": "restaurant_search",
-            "attraction_search": "attraction_search",
-            "transport_search": "transport_search",
-        }
-
-        for td in tasks_data:
-            task_type = td.get("task_type", td.get("type", ""))
-            # Normalize task type to tool name
-            tool_name = task_type_to_tool.get(task_type, task_type)
-            params = td.get("parameters", {})
-
-            # Ensure location is in params
-            if state.location and "location" not in params:
-                params["location"] = state.location
-
-            tasks.append(Task(
-                task_type=tool_name,
-                parameters=params,
-            ))
-
-        logger.info(f"Decomposed into {len(tasks)} tasks: {[t.task_type for t in tasks]}")
-        return tasks
-
-    def _fallback_decompose(self, state: PlanState) -> List[dict]:
-        """Fallback decomposition when LLM fails."""
-        tasks = []
-
-        # Default location to Cambridge if missing (MultiWOZ is Cambridge data)
-        location = state.location or "cambridge"
-
-        if state.intent in ("trip_planning", "schedule_generation"):
-            tasks.append({
-                "task_type": "search_attractions",
-                "parameters": {"location": location, "interests": state.interests},
-            })
-            tasks.append({
-                "task_type": "search_restaurants",
-                "parameters": {
-                    "location": location,
-                    "preferences": state.preferences,
-                },
-            })
-            tasks.append({
-                "task_type": "search_hotels",
-                "parameters": {"location": location},
-            })
-
-        elif state.intent == "hotel_search":
-            tasks.append({
-                "task_type": "search_hotels",
-                "parameters": {"location": location},
-            })
-
-        elif state.intent == "restaurant_search":
-            tasks.append({
-                "task_type": "search_restaurants",
-                "parameters": {
-                    "location": location,
-                    "preferences": state.preferences,
-                },
-            })
-
-        elif state.intent == "attraction_search":
-            tasks.append({
-                "task_type": "search_attractions",
-                "parameters": {
-                    "location": location,
-                    "interests": state.interests,
-                },
-            })
-
-        elif state.intent == "transport_search":
-            tasks.append({
-                "task_type": "search_transport",
-                "parameters": {"location": location},
-            })
-
-        return tasks
-
-    def _execute_tools(
-        self, tasks: List[Task], state: PlanState
-    ) -> PlanState:
-        """EXECUTING state: Run tools for each task."""
-        # Import tools to register them
-        import app.tools.hotel  # noqa: F401
-        import app.tools.restaurant  # noqa: F401
-        import app.tools.attraction  # noqa: F401
-        import app.tools.transport  # noqa: F401
+    def _execute_tools(self, tasks: List[Task], state: PlanState) -> PlanState:
+        """EXECUTING state: run tools for each task."""
+        import app.tools  # noqa: F401  (registers all tools)
 
         for task in tasks:
-            if task.task_type == "generate_schedule":
-                task.status = TaskStatus.SKIPPED
-                continue
-
             logger.info(f"Executing tool: {task.task_type}")
             result = execute_tool(task.task_type, task.parameters)
-            task.result = result
-            task.status = (
-                TaskStatus.COMPLETED if result.success else TaskStatus.FAILED
-            )
+            task.result = None  # results live in state.tool_results
+            task.status = TaskStatus.COMPLETED if result.success else TaskStatus.FAILED
             state = self.state_manager.update_from_tool_result(state, result)
-
         return state
 
+    def _data_source(self, state: PlanState) -> str:
+        sources = {
+            r.get("source") for records in state.chosen_options.values() for r in records
+        }
+        if "openstreetmap" in sources:
+            return "openstreetmap"
+        if "multiwoz" in sources:
+            return "multiwoz"
+        return "ai_knowledge"
+
+    def _data_source_label(self, state: PlanState) -> str:
+        return {
+            "openstreetmap": "live OpenStreetMap data",
+            "multiwoz": "MultiWOZ 2.2 Cambridge dataset",
+            "ai_knowledge": "no verified data available",
+        }[self._data_source(state)]
+
+    # ════════════════════════════════════════════════════════════
+    # Single-domain search
+    # ════════════════════════════════════════════════════════════
+
+    def _is_single_domain_search(self, state: PlanState) -> bool:
+        return state.intent in SEARCH_INTENTS
+
+    def _handle_search_results(
+        self, state: PlanState, intent: IntentResult, warnings: List[str]
+    ) -> AgentResponse:
+        """Answer a single-domain search from live data, worded by the LLM."""
+        state = self.state_manager.set_status(state, AgentStatus.COMPLETED)
+        domain = state.intent.replace("_search", "")
+        location = state.location or "the selected area"
+        constraints = self._build_constraints_summary(state)
+        warnings = list(warnings)
+
+        results: List[Dict[str, Any]] = []
+        lookup_failed = False
+        for tr in state.tool_results:
+            if tr.success:
+                results.extend(tr.results)
+            else:
+                lookup_failed = True
+
+        notice = None
+
+        # No verified results → honest AI-knowledge suggestions
+        if not results:
+            try:
+                text = self.llm.generate(
+                    prompt=prompts.knowledge_search_prompt(domain, state.goal or "", location, constraints),
+                    system=prompts.SYSTEM_ASSISTANT,
+                    temperature=0.4,
+                    max_tokens=600,
+                )
+                reason = (
+                    "Live map data is temporarily unavailable"
+                    if lookup_failed else f"No mapped {domain} results were found for {location}"
+                )
+                warnings.append(f"{reason} - these are AI suggestions, not verified listings.")
+            except Exception:
+                text = (
+                    f"I couldn't find any {domain} options for **{location}** right now"
+                    + (" because the live map service is not responding" if lookup_failed else "")
+                    + ". Try a nearby larger town, a different category, or ask again in a moment."
+                )
+            return self._respond(
+                state, ResponseStatus.COMPLETED, text, intent=intent,
+                validation=ConstraintResult(valid=True, violations=[], warnings=warnings),
+            )
+
+        options_summary = self.state_manager.get_retrieved_options_summary(state)
+        try:
+            text = self.llm.generate(
+                prompt=prompts.search_results_prompt(
+                    domain, options_summary, state.goal or "", location, constraints
+                ),
+                system=prompts.SYSTEM_ASSISTANT,
+                temperature=0.4,
+                max_tokens=700,
+            )
+        except Exception as e:
+            logger.warning(f"Search summary failed, formatting directly: {str(e)[:120]}")
+            text = self._format_search_results(domain, results, state)
+            if self.llm.frugal:
+                notice = _FRUGAL_NOTICE
+
+        return self._respond(
+            state, ResponseStatus.COMPLETED, text, intent=intent,
+            validation=ConstraintResult(valid=True, violations=[], warnings=warnings),
+            results=results[:8], results_domain=domain, notice=notice,
+        )
+
+    def _format_search_results(
+        self, domain: str, results: List[dict], state: Optional[PlanState] = None
+    ) -> str:
+        """Deterministic formatting for single-domain search results."""
+        domain_emoji = {"hotel": "🏨", "restaurant": "🍽️", "attraction": "🎯", "transport": "🚆"}
+        labels = {
+            "hotel": "places to stay", "restaurant": "places to eat",
+            "attraction": "things to see", "transport": "transport options",
+        }
+        where = f" in {state.location}" if state and state.location else ""
+        lines = [f"{domain_emoji.get(domain, '📋')} **Top {labels.get(domain, domain)}{where}:**\n"]
+
+        for i, rec in enumerate(results[:8], 1):
+            parts = []
+            if rec.get("type"):
+                parts.append(str(rec["type"]))
+            if rec.get("food"):
+                parts.append(str(rec["food"]))
+            if rec.get("stars"):
+                parts.append(f"{rec['stars']}★")
+            if rec.get("pricerange"):
+                parts.append(str(rec["pricerange"]))
+            if rec.get("vegetarian"):
+                parts.append("vegetarian-friendly")
+            if rec.get("entrance_fee"):
+                parts.append(f"entry: {rec['entrance_fee']}")
+            if rec.get("departure") and rec.get("destination"):
+                parts.append(f"{rec['departure']} → {rec['destination']}")
+            if rec.get("leaveAt") or rec.get("leave_at"):
+                parts.append(f"departs {rec.get('leaveAt') or rec.get('leave_at')}")
+            city = (state.place or {}).get("name") if state else None
+            if rec.get("area") and rec.get("area") != city:
+                parts.append(str(rec["area"]))
+            if rec.get("price"):
+                parts.append(str(rec["price"]))
+            if rec.get("distance_km") is not None:
+                parts.append(f"{rec['distance_km']} km from centre")
+            name = rec.get("name") or rec.get("trainID") or rec.get("train_id") or "Option"
+            lines.append(f"{i}. **{name}** - {', '.join(parts) if parts else 'details on the map'}")
+
+        source = self._data_source_label(state) if state else "verified data"
+        lines.append(f"\n_Source: {source}_")
+        return "\n".join(lines)
+
+    # ════════════════════════════════════════════════════════════
+    # Planning
+    # ════════════════════════════════════════════════════════════
+
+    def _plan_and_respond(
+        self,
+        state: PlanState,
+        intent: Optional[IntentResult],
+        extra_warnings: List[str],
+        candidate_plan: Optional[Plan] = None,
+    ) -> AgentResponse:
+        """PLANNING → VALIDATING → (REPLANNING) → VERIFYING → COMPLETED."""
+        notice = None
+        if candidate_plan is None:
+            state = self.state_manager.set_status(state, AgentStatus.PLANNING)
+            candidate_plan = self._generate_plan(state)
+
+        if candidate_plan is None:
+            state = self.state_manager.set_status(state, AgentStatus.ERROR)
+            return self._respond(
+                state,
+                ResponseStatus.ERROR,
+                "I wasn't able to generate a plan this time - the AI model didn't respond and "
+                "there wasn't enough live data to build one without it. Please try again in a "
+                "moment, or try a larger nearby destination.",
+                intent=intent,
+                notice=_FRUGAL_NOTICE if self.llm.frugal else None,
+            )
+
+        candidate_plan = self._finalize_plan(candidate_plan, state)
+
+        # ─── VALIDATING (+ REPLANNING) ───────────────────────────
+        state = self.state_manager.set_status(state, AgentStatus.VALIDATING)
+        validation = validate_plan(candidate_plan, state)
+
+        attempts = 0
+        while not validation.valid and attempts < MAX_REPLAN_ATTEMPTS:
+            attempts += 1
+            state = self.state_manager.set_status(state, AgentStatus.REPLANNING)
+            state = self.state_manager.set_violations(state, validation.violations)
+            logger.info(f"Replanning attempt {attempts}: {validation.violations}")
+
+            revised = self._repair_plan(candidate_plan, state, validation.violations, use_llm=(attempts == 1))
+            if revised is None:
+                break
+            candidate_plan = self._finalize_plan(revised, state)
+            validation = validate_plan(candidate_plan, state)
+
+        if not validation.valid:
+            msg = self._explain_constraint_failure(state, validation)
+            return self._respond(
+                state, ResponseStatus.CONSTRAINT_FAILURE, msg, intent=intent,
+                validation=validation, plan=candidate_plan,
+            )
+        state = self.state_manager.set_violations(state, [])
+
+        # ─── VERIFYING ───────────────────────────────────────────
+        state = self.state_manager.set_status(state, AgentStatus.VERIFYING)
+        verification = verify_plan(candidate_plan, state)
+
+        # ─── COMPLETED ───────────────────────────────────────────
+        state = self.state_manager.set_status(state, AgentStatus.COMPLETED)
+        state = self.state_manager.update_plan(state, candidate_plan)
+
+        if not candidate_plan.summary and self.llm.frugal:
+            notice = _FRUGAL_NOTICE  # plan was built from data without AI wording
+
+        warnings: List[str] = []
+        for w in validation.warnings + verification.warnings + list(extra_warnings):
+            if w not in warnings:
+                warnings.append(w)
+
+        return self._respond(
+            state, ResponseStatus.COMPLETED, self._format_plan_text(candidate_plan, state),
+            intent=intent, plan=candidate_plan,
+            validation=ConstraintResult(valid=True, violations=[], warnings=warnings),
+            notice=notice,
+        )
+
     def _generate_plan(self, state: PlanState) -> Optional[Plan]:
-        """PLANNING state: Generate a candidate plan using LLM."""
+        """PLANNING state: ask the LLM for a candidate plan."""
         state_summary = self.state_manager.get_state_summary(state)
-        retrieved_options = self.state_manager.get_retrieved_options_summary(state)
         constraints_summary = self._build_constraints_summary(state)
 
-        if state.intent in ("study_planning", "schedule_generation"):
-            prompt = study_schedule_prompt(state_summary, constraints_summary)
+        if state.intent in SCHEDULE_INTENTS:
+            prompt = prompts.study_schedule_prompt(state_summary, constraints_summary)
         else:
-            prompt = schedule_prompt(state_summary, retrieved_options, constraints_summary)
+            prompt = prompts.schedule_prompt(
+                state_summary,
+                self.state_manager.get_retrieved_options_summary(state),
+                constraints_summary,
+                state.currency or "USD",
+                self._data_source_label(state),
+            )
 
         try:
             plan = self.llm.generate_structured(
                 prompt=prompt,
                 schema=Plan,
                 system="You are a schedule generation system. Respond with JSON only.",
+                temperature=0.3,
             )
+            if not plan.days:
+                raise RuntimeError("LLM returned a plan without days")
             logger.info(f"Plan generated: {len(plan.days)} days")
             return plan
-        except RuntimeError as e:
-            logger.error(f"Plan generation failed: {e}")
+        except Exception as e:
+            logger.warning(f"LLM plan generation failed, building without it: {str(e)[:160]}")
+            if state.intent in SCHEDULE_INTENTS:
+                return self._fallback_study_plan(state)
             return self._fallback_plan(state)
 
+    def _repair_plan(
+        self, plan: Plan, state: PlanState, violations: List[str], use_llm: bool
+    ) -> Optional[Plan]:
+        """REPLANNING state: fix violations - LLM first, deterministic repair second."""
+        if use_llm and not self.llm.frugal:
+            prompt = prompts.replanning_prompt(
+                self.state_manager.get_state_summary(state) + "\n" + self._build_constraints_summary(state),
+                plan.model_dump_json(exclude_none=True),
+                "\n".join(f"- {v}" for v in violations),
+                self.state_manager.get_retrieved_options_summary(state),
+                state.currency or "USD",
+            )
+            try:
+                revised = self.llm.generate_structured(
+                    prompt=prompt,
+                    schema=Plan,
+                    system="You are a replanning system. Fix the problems. JSON only.",
+                    temperature=0.2,
+                )
+                if revised.days:
+                    return revised
+            except Exception as e:
+                logger.warning(f"LLM replanning failed: {str(e)[:120]}")
+
+        return self._repair_deterministically(plan, state)
+
+    def _repair_deterministically(self, plan: Plan, state: PlanState) -> Optional[Plan]:
+        """Fix day count and budget overruns without the LLM."""
+        plan = plan.model_copy(deep=True)
+        wanted = state.duration_days
+
+        # Day count
+        if wanted and len(plan.days) > wanted:
+            plan.days = plan.days[:wanted]
+        elif wanted and len(plan.days) < wanted:
+            filler = self._fallback_plan(state)
+            if filler is not None:
+                used = {a.name.lower() for d in plan.days for s in d.slots for a in s.activities}
+                for extra in filler.days[len(plan.days):wanted]:
+                    for slot in extra.slots:
+                        slot.activities = [a for a in slot.activities if a.name.lower() not in used]
+                    plan.days.append(extra)
+            while len(plan.days) < wanted:
+                plan.days.append(PlanDay(day=len(plan.days) + 1, slots=[
+                    PlanTimeSlot(time_of_day="morning", activities=[
+                        PlanActivity(name="Free time to explore at your own pace", type="activity",
+                                     estimated_cost=0, details={"source": "placeholder"})
+                    ]),
+                    PlanTimeSlot(time_of_day="afternoon"),
+                    PlanTimeSlot(time_of_day="evening"),
+                ]))
+
+        # Budget: drop the most expensive removable activities first
+        if state.budget is not None:
+            def total() -> float:
+                return sum(a.estimated_cost or 0 for d in plan.days for s in d.slots for a in s.activities)
+
+            removed: List[str] = []
+            guard = 0
+            while total() > state.budget and guard < 60:
+                guard += 1
+                candidates = []
+                for day in plan.days:
+                    day_count = sum(len(s.activities) for s in day.slots)
+                    for slot in day.slots:
+                        for activity in slot.activities:
+                            if (activity.estimated_cost or 0) > 0 and day_count > 1:
+                                candidates.append((activity.estimated_cost, day, slot, activity))
+                if not candidates:
+                    break
+                _, _, slot, activity = max(candidates, key=lambda c: c[0])
+                slot.activities.remove(activity)
+                removed.append(activity.name)
+            if removed:
+                plan.assumptions.append(
+                    "Removed to fit the budget: " + ", ".join(removed[:6])
+                    + ("..." if len(removed) > 6 else "")
+                )
+        return plan
+
+    def _finalize_plan(self, plan: Plan, state: PlanState) -> Plan:
+        """Make the plan exact: numbering, dates, grounding details, totals."""
+        # Index retrieved records by name for grounding
+        records: Dict[str, Dict[str, Any]] = {}
+        for domain, recs in state.chosen_options.items():
+            for rec in recs:
+                if rec.get("name"):
+                    records[str(rec["name"]).lower().strip()] = {**rec, "_domain": domain}
+
+        is_trip = state.intent not in SCHEDULE_INTENTS
+        start = date.fromisoformat(state.start_date) if state.start_date else None
+
+        days: List[PlanDay] = []
+        for index, day in enumerate(sorted(plan.days, key=lambda d: d.day), start=1):
+            by_slot: Dict[str, List[PlanActivity]] = {name: [] for name in SLOT_ORDER}
+            for slot in day.slots:
+                key = slot.time_of_day if slot.time_of_day in SLOT_ORDER else (
+                    "evening" if "night" in slot.time_of_day or "dinner" in slot.time_of_day
+                    else "afternoon" if "noon" in slot.time_of_day or "lunch" in slot.time_of_day
+                    else "morning"
+                )
+                by_slot[key].extend(slot.activities)
+
+            slots = []
+            for name in SLOT_ORDER:
+                activities = []
+                for activity in by_slot[name]:
+                    if not activity.name or not activity.name.strip():
+                        continue
+                    activity.name = activity.name.strip()
+                    match = records.get(activity.name.lower())
+                    if match is None:
+                        match = next(
+                            (r for key, r in records.items()
+                             if len(key) > 4 and (key in activity.name.lower() or activity.name.lower() in key)),
+                            None,
+                        )
+                    if match is not None:
+                        grounded = {
+                            k: match[k] for k in (
+                                "address", "area", "lat", "lon", "map_url", "website", "phone",
+                                "opening_hours", "food", "stars", "pricerange", "entrance_fee",
+                                "distance_km", "source",
+                            ) if match.get(k) not in (None, "")
+                        }
+                        note = activity.details.get("note") or activity.details.get("description")
+                        activity.details = {**grounded, **({"note": note} if note else {})}
+                        if activity.type in ("activity", ""):
+                            activity.type = match["_domain"]
+                    elif is_trip and activity.type in ("attraction", "restaurant", "hotel"):
+                        activity.details.setdefault("source", "ai_suggested")
+                    if activity.estimated_cost is not None and activity.estimated_cost < 0:
+                        activity.estimated_cost = None
+                    activities.append(activity)
+                activities.sort(key=lambda a: a.start_time or "99:99")
+                slots.append(PlanTimeSlot(time_of_day=name, activities=activities))
+
+            days.append(PlanDay(
+                day=index,
+                date=(start + timedelta(days=index - 1)).isoformat() if start else None,
+                slots=slots,
+            ))
+
+        plan.days = days
+        plan.duration_days = len(days) or 1
+        if is_trip:
+            plan.location = state.location or plan.location
+            plan.currency = state.currency or plan.currency
+            plan.plan_type = "trip"
+            costs = [a.estimated_cost for d in days for s in d.slots for a in s.activities
+                     if a.estimated_cost is not None]
+            plan.estimated_total_cost = float(sum(costs)) if costs else None
+        else:
+            plan.plan_type = "study"
+            plan.estimated_total_cost = None
+        plan.start_date = state.start_date
+        plan.end_date = days[-1].date if days and days[-1].date else state.end_date
+        return plan
+
+    @staticmethod
+    def _extract_subjects(goal: str) -> List[str]:
+        """Subjects/topics named in a study request ("... for maths and physics")."""
+        match = re.search(
+            r"\b(?:for|on|covering|about)\s+"
+            r"(?!\d)(.+?)(?=\s+(?:with|in|over|across|within|before|for\s+\d|during|every|each|per)\b|[.!?]|$)",
+            goal, re.IGNORECASE,
+        )
+        if not match:
+            return []
+        raw = re.sub(r"\b(my|the|an?|upcoming|exams?|tests?|subjects?|schedule|plan)\b", " ", match.group(1),
+                     flags=re.IGNORECASE)
+        parts = [p.strip(" .") for p in re.split(r",|\band\b|&|/|\+", raw)]
+        return [p.title() for p in parts if 2 <= len(p) <= 40][:6]
+
+    def _fallback_study_plan(self, state: PlanState) -> Plan:
+        """A balanced study timetable built without the LLM."""
+        subjects = self._extract_subjects(state.goal or "") or ["Core topic", "Practice problems"]
+        duration = state.duration_days or 3
+        blocks = [
+            ("morning", "09:00", 90, "Learn new material while you are fresh"),
+            ("morning", "11:00", 60, "Work through practice questions"),
+            ("afternoon", "14:00", 90, "Deep-focus session on the harder topics"),
+            ("afternoon", "16:00", 45, "Summarise notes and make flashcards"),
+            ("evening", "19:00", 45, "Light review of everything covered today"),
+        ]
+        days = []
+        cursor = 0
+        for day_num in range(1, duration + 1):
+            slots: Dict[str, List[PlanActivity]] = {name: [] for name in SLOT_ORDER}
+            for slot, start, minutes, note in blocks:
+                subject = subjects[cursor % len(subjects)]
+                cursor += 1
+                slots[slot].append(PlanActivity(
+                    name=subject, type="study", start_time=start,
+                    duration_minutes=minutes, details={"note": note},
+                ))
+            slots["morning"].insert(1, PlanActivity(
+                name="Short break", type="break", start_time="10:30", duration_minutes=30,
+                details={"note": "Stretch, hydrate, step away from the desk"},
+            ))
+            slots["afternoon"].insert(1, PlanActivity(
+                name="Break and a walk", type="break", start_time="15:30", duration_minutes=30,
+                details={"note": "Fresh air helps the next session stick"},
+            ))
+            days.append(PlanDay(day=day_num, slots=[
+                PlanTimeSlot(time_of_day=name, activities=slots[name]) for name in SLOT_ORDER
+            ]))
+        return Plan(
+            duration_days=duration, days=days, plan_type="study",
+            assumptions=["Standard timetable built without AI wording - ask again for a tailored version"],
+        )
+
     def _fallback_plan(self, state: PlanState) -> Optional[Plan]:
-        """Create a basic plan from retrieved data when LLM fails."""
-        if not state.chosen_options and not state.tool_results:
-            return None
-
-        from app.models.schemas import PlanActivity, PlanDay, PlanTimeSlot
-
-        # Rebuild chosen_options from tool_results if empty
+        """Build a simple plan straight from retrieved data (no LLM)."""
         if not state.chosen_options and state.tool_results:
             for tr in state.tool_results:
                 if tr.success and tr.results:
                     domain = tr.tool_name.replace("_search", "").replace("search_", "")
                     state.chosen_options[domain] = tr.results
 
-        if not state.chosen_options:
-            return None
-
-        days = []
-        duration = state.duration_days or 1
-
-        # Gather all available options
         attractions = state.chosen_options.get("attraction", [])
         restaurants = state.chosen_options.get("restaurant", [])
         hotels = state.chosen_options.get("hotel", [])
+        if not attractions and not restaurants:
+            return None
 
-        attraction_idx = 0
-        restaurant_idx = 0
+        currency = state.currency
+        duration = state.duration_days or 1
+        level = tool_common.price_level(None, state.preferences) or "moderate"
 
+        def attraction(rec: Dict[str, Any], start_time: str) -> PlanActivity:
+            return PlanActivity(
+                name=rec.get("name", "Attraction"), type="attraction", start_time=start_time,
+                estimated_cost=self._parse_cost(rec.get("entrance_fee")),
+                duration_minutes=120, details=dict(rec),
+            )
+
+        def meal(rec: Dict[str, Any], start_time: str) -> PlanActivity:
+            return PlanActivity(
+                name=rec.get("name", "Restaurant"), type="restaurant", start_time=start_time,
+                estimated_cost=money.estimate_meal_cost(rec.get("pricerange") or level, currency),
+                duration_minutes=60, details=dict(rec),
+            )
+
+        a_idx = r_idx = 0
+        days = []
         for day_num in range(1, duration + 1):
-            slots = []
-            for time_slot in ["morning", "afternoon", "evening"]:
-                activities = []
-                if time_slot in ("morning", "afternoon") and attraction_idx < len(attractions):
-                    att = attractions[attraction_idx]
-                    activities.append(PlanActivity(
-                        name=att.get("name", "Unknown Attraction"),
-                        type="attraction",
-                        estimated_cost=self._parse_cost(att.get("entrance_fee")),
-                        details=att,
-                    ))
-                    attraction_idx += 1
-                if time_slot in ("afternoon", "evening") and restaurant_idx < len(restaurants):
-                    rest = restaurants[restaurant_idx]
-                    activities.append(PlanActivity(
-                        name=rest.get("name", "Unknown Restaurant"),
-                        type="restaurant",
-                        estimated_cost=self._estimate_meal_cost(rest.get("pricerange")),
-                        details=rest,
-                    ))
-                    restaurant_idx += 1
-
-                # Add hotel info on first day morning if available
-                if day_num == 1 and time_slot == "morning" and hotels:
-                    hotel = hotels[0]
-                    activities.append(PlanActivity(
-                        name=hotel.get("name", "Unknown Hotel"),
-                        type="hotel",
-                        estimated_cost=self._estimate_meal_cost(hotel.get("pricerange")),
-                        details=hotel,
-                    ))
-
-                slots.append(PlanTimeSlot(time_of_day=time_slot, activities=activities))
-            days.append(PlanDay(day=day_num, slots=slots))
-
-        total_cost = sum(
-            a.estimated_cost or 0
-            for d in days for s in d.slots for a in s.activities
-        )
+            morning, afternoon, evening = [], [], []
+            if a_idx < len(attractions):
+                morning.append(attraction(attractions[a_idx], "09:30")); a_idx += 1
+            if r_idx < len(restaurants):
+                afternoon.append(meal(restaurants[r_idx], "13:00")); r_idx += 1
+            if a_idx < len(attractions):
+                afternoon.append(attraction(attractions[a_idx], "14:30")); a_idx += 1
+            if r_idx < len(restaurants):
+                evening.append(meal(restaurants[r_idx], "19:30")); r_idx += 1
+            if hotels and day_num < duration:
+                hotel = hotels[0]
+                evening.append(PlanActivity(
+                    name=hotel.get("name", "Hotel"), type="hotel", start_time="21:00",
+                    estimated_cost=money.estimate_hotel_cost(hotel.get("pricerange") or level, currency),
+                    details=dict(hotel),
+                ))
+            if not (morning or afternoon or evening):
+                morning.append(PlanActivity(
+                    name="Free time to explore at your own pace", type="activity",
+                    estimated_cost=0, details={"source": "placeholder"},
+                ))
+            days.append(PlanDay(day=day_num, slots=[
+                PlanTimeSlot(time_of_day="morning", activities=morning),
+                PlanTimeSlot(time_of_day="afternoon", activities=afternoon),
+                PlanTimeSlot(time_of_day="evening", activities=evening),
+            ]))
 
         return Plan(
-            location=state.location or "Cambridge",
+            location=state.location,
             duration_days=duration,
             days=days,
-            estimated_total_cost=total_cost if total_cost > 0 else None,
-            assumptions=["Plan generated from available MultiWOZ data", "All locations are in Cambridge, UK"],
+            assumptions=[
+                f"Built directly from {self._data_source_label(state)} (AI wording unavailable)",
+                "Meal and hotel costs are rough per-person estimates",
+            ],
         )
 
-    def _replan(
-        self, state: PlanState, violations: List[str]
-    ) -> Optional[Plan]:
-        """REPLANNING state: Revise plan to fix violations."""
-        state_summary = self.state_manager.get_state_summary(state)
-        retrieved_options = self.state_manager.get_retrieved_options_summary(state)
-        current_plan_summary = ""
-        if state.current_plan:
-            current_plan_summary = state.current_plan.model_dump_json(indent=2)
-        violations_str = "\n".join(f"- {v}" for v in violations)
+    # ════════════════════════════════════════════════════════════
+    # Replanning (user changes an existing plan)
+    # ════════════════════════════════════════════════════════════
 
-        prompt = replanning_prompt(
-            state_summary, current_plan_summary, violations_str, retrieved_options
+    def _handle_replanning(
+        self, state: PlanState, intent: IntentResult, location_changed: bool = False
+    ) -> AgentResponse:
+        """Handle explicit replanning when the user modifies requirements."""
+        logger.info("Handling replanning request")
+
+        if intent.raw_changes:
+            safe_changes = {k: v for k, v in intent.raw_changes.items() if k != "location"}
+            state = self.state_manager.apply_changes(state, safe_changes)
+        else:
+            state.replan_count += 1
+        self._resolve_dates(state, IntentResult(intent=intent.intent), {})
+
+        is_trip = state.intent not in SCHEDULE_INTENTS
+        if is_trip and (location_changed or not state.chosen_options):
+            state.tool_results = []
+            state.chosen_options = {}
+            state.intent = "trip_planning"
+            state = self._execute_tools(self._decompose(state), state)
+
+        state = self.state_manager.set_status(state, AgentStatus.REPLANNING)
+        warnings = check_impossible_constraints(state)
+
+        revised: Optional[Plan] = None
+        if state.current_plan is not None and not location_changed and not self.llm.frugal:
+            changes = [f"User request: {state.goal}"]
+            current_validation = validate_plan(state.current_plan, state)
+            changes += current_validation.violations
+            try:
+                revised = self.llm.generate_structured(
+                    prompt=prompts.replanning_prompt(
+                        self.state_manager.get_state_summary(state) + "\n"
+                        + self._build_constraints_summary(state),
+                        state.current_plan.model_dump_json(exclude_none=True),
+                        "\n".join(f"- {c}" for c in changes),
+                        self.state_manager.get_retrieved_options_summary(state),
+                        state.currency or "USD",
+                    ),
+                    schema=Plan,
+                    system="You are a replanning system. Apply the requested change. JSON only.",
+                    temperature=0.2,
+                )
+                if not revised.days:
+                    revised = None
+            except Exception as e:
+                logger.warning(f"LLM replanning failed: {str(e)[:120]}")
+                revised = None
+
+        if revised is None and state.current_plan is not None and not location_changed:
+            revised = self._repair_deterministically(state.current_plan, state)
+
+        return self._plan_and_respond(state, intent, warnings, candidate_plan=revised)
+
+    def replan_with_changes(self, state: PlanState, changes: Dict[str, Any]) -> AgentResponse:
+        """Explicit replanning through the API (POST /replan) with structured changes."""
+        description = ", ".join(f"{k} to {v}" for k, v in changes.items())
+        message = f"Change {description}"
+        state = self.state_manager.add_message(state, "user", message)
+        state = self.state_manager.set_goal(state, message)
+        intent = IntentResult(intent="replanning", is_modification=True, raw_changes=dict(changes))
+        try:
+            location_changed = False
+            new_location = changes.get("location")
+            if isinstance(new_location, str) and new_location.strip():
+                place = geocoder.geocode(tool_common.strip_area_words(new_location))
+                if place is not None:
+                    location_changed = True
+                    self._set_place(state, place)
+                    self._resolve_currency(state, intent, message)
+            return self._handle_replanning(state, intent, location_changed)
+        except Exception as e:
+            logger.error(f"Replanning failed: {e}", exc_info=True)
+            return self._respond(
+                state, ResponseStatus.ERROR,
+                "Something went wrong while updating the plan. Please try again.",
+                intent=intent,
+            )
+
+    # ════════════════════════════════════════════════════════════
+    # Response building
+    # ════════════════════════════════════════════════════════════
+
+    def _respond(
+        self,
+        state: PlanState,
+        status: ResponseStatus,
+        message: str,
+        intent: Optional[IntentResult] = None,
+        plan: Optional[Plan] = None,
+        validation: Optional[ConstraintResult] = None,
+        results: Optional[List[Dict[str, Any]]] = None,
+        results_domain: Optional[str] = None,
+        notice: Optional[str] = None,
+    ) -> AgentResponse:
+        state = self.state_manager.add_message(state, "assistant", message)
+        place = state.place or {}
+        context: Dict[str, Any] = {
+            "location": state.location,
+            "lat": place.get("lat"),
+            "lon": place.get("lon"),
+            "country": place.get("country"),
+            "start_date": state.start_date,
+            "end_date": state.end_date,
+            "duration_days": state.duration_days,
+            "budget": state.budget,
+            "currency": state.currency,
+            "currency_symbol": money.currency_symbol(state.currency).strip(),
+            "data_source": self._data_source(state) if state.chosen_options else None,
+            "llm_provider": self.llm.last_provider,
+        }
+        if notice:
+            context["notice"] = notice
+        return AgentResponse(
+            session_id=state.session_id,
+            status=status,
+            message=message,
+            plan=plan,
+            validation=validation,
+            intent=intent,
+            results=results or [],
+            results_domain=results_domain,
+            context=context,
         )
 
-        try:
-            plan = self.llm.generate_structured(
-                prompt=prompt,
-                schema=Plan,
-                system="You are a replanning system. Fix the violations. JSON only.",
-            )
-            return plan
-        except RuntimeError:
-            logger.warning("LLM replanning failed, using fallback")
-            return self._fallback_plan(state)
-
-    def _generate_response(self, plan: Plan, state: PlanState) -> str:
-        """COMPLETED state: Generate natural language response."""
-        plan_summary = plan.model_dump_json(indent=2)
-        state_summary = self.state_manager.get_state_summary(state)
-        prompt = response_prompt(plan_summary, state_summary)
-
-        try:
-            response = self.llm.generate(
-                prompt=prompt,
-                system="You are a helpful planning assistant. Create a clear, readable summary.",
-                temperature=0.5,
-            )
-            return response
-        except Exception:
-            # Fallback: format plan directly
-            return self._format_plan_text(plan, state)
-
-    def _generate_clarification(
-        self, missing: List[str], state: PlanState
-    ) -> str:
-        """Generate a clarification message."""
-        state_summary = self.state_manager.get_state_summary(state)
-        prompt = clarification_prompt(missing, state_summary)
-
-        try:
-            return self.llm.generate(prompt=prompt, temperature=0.5)
-        except Exception:
-            fields = ", ".join(missing)
-            return f"I need a few more details to create your plan. Could you provide: {fields}?"
-
-    def _explain_constraint_failure(
-        self, state: PlanState, validation: ConstraintResult
-    ) -> str:
-        """Explain why constraints couldn't be satisfied."""
-        violations_str = "\n".join(f"• {v}" for v in validation.violations)
-        warnings_str = "\n".join(f"• {w}" for w in validation.warnings) if validation.warnings else ""
-
+    def _explain_constraint_failure(self, state: PlanState, validation: ConstraintResult) -> str:
+        violations_str = "\n".join(f"- {v}" for v in validation.violations)
         msg = (
-            "I wasn't able to create a plan that satisfies all your requirements:\n\n"
+            "I couldn't create a plan that satisfies all of your requirements:\n\n"
             f"{violations_str}\n"
         )
-        if warnings_str:
-            msg += f"\nAdditional notes:\n{warnings_str}\n"
+        if validation.warnings:
+            msg += "\nAlso worth knowing:\n" + "\n".join(f"- {w}" for w in validation.warnings) + "\n"
         msg += (
             "\nYou could try:\n"
             "- Increasing the budget\n"
             "- Reducing the number of days\n"
-            "- Being more flexible with preferences"
+            "- Being more flexible with preferences\n\n"
+            "The closest plan I could build is shown in the panel."
         )
         return msg
 
     def _format_plan_text(self, plan: Plan, state: PlanState) -> str:
-        """Fallback plan formatting when LLM response generation fails."""
-        lines = []
-        if plan.location:
-            lines.append(f"📍 **Plan for {plan.location}** ({plan.duration_days} day(s))\n")
+        """Readable markdown for a finished plan (totals are computed, never LLM-written)."""
+        currency = plan.currency or state.currency
+        lines: List[str] = []
 
+        if plan.plan_type == "study":
+            title = f"📚 **Your {plan.duration_days}-day schedule**"
+        else:
+            title = f"📍 **{plan.duration_days}-day plan for {plan.location or 'your trip'}**"
+        if plan.start_date:
+            title += f" · {self._pretty_date(plan.start_date)}"
+            if plan.end_date and plan.end_date != plan.start_date:
+                title += f" → {self._pretty_date(plan.end_date)}"
+        lines.append(title)
+        if plan.summary:
+            lines.append("")
+            lines.append(plan.summary.strip())
+
+        emoji = {"attraction": "🎯", "restaurant": "🍽️", "hotel": "🏨", "transport": "🚆",
+                 "study": "📖", "break": "☕"}
         for day in plan.days:
-            lines.append(f"\n**Day {day.day}**")
+            header = f"\n### Day {day.day}"
+            if day.date:
+                header += f" · {self._pretty_date(day.date, weekday=True)}"
+            lines.append(header)
             for slot in day.slots:
-                lines.append(f"  {slot.time_of_day.capitalize()}:")
-                if slot.activities:
-                    for act in slot.activities:
-                        cost_str = f" (₹{act.estimated_cost:.0f})" if act.estimated_cost else ""
-                        lines.append(f"    • {act.name}{cost_str}")
-                else:
-                    lines.append("    • Free time")
+                if not slot.activities:
+                    continue
+                lines.append(f"**{slot.time_of_day.capitalize()}**")
+                for act in slot.activities:
+                    bits = []
+                    if act.start_time:
+                        bits.append(act.start_time)
+                    bits.append(f"{emoji.get(act.type, '•')} {act.name}")
+                    line = "- " + " ".join(bits)
+                    if act.estimated_cost:
+                        line += f" ({money.format_money(act.estimated_cost, currency)})"
+                    elif act.estimated_cost == 0 and act.type == "attraction":
+                        line += " (free)"
+                    note = act.details.get("note")
+                    if note:
+                        line += f" - {note}"
+                    lines.append(line)
 
         if plan.estimated_total_cost is not None:
-            budget_str = f"\n💰 **Estimated total**: ₹{plan.estimated_total_cost:.0f}"
+            budget_line = f"\n💰 **Estimated total:** {money.format_money(plan.estimated_total_cost, currency)} per person"
             if state.budget:
-                budget_str += f" / ₹{state.budget:.0f} budget"
-            lines.append(budget_str)
-
-        if state.preferences:
-            lines.append(f"\n✅ **Preferences applied**: {', '.join(state.preferences)}")
-
+                budget_line += f" of your {money.format_money(state.budget, currency)} budget"
+            lines.append(budget_line)
+        if state.preferences and plan.plan_type != "study":
+            lines.append(f"✅ **Preferences applied:** {', '.join(state.preferences)}")
+        if plan.plan_type != "study" and state.chosen_options:
+            lines.append(f"\n_Places from {self._data_source_label(state)}; costs are estimates._")
         return "\n".join(lines)
 
-    # ── Helpers ──────────────────────────────────────────────────
+    # ════════════════════════════════════════════════════════════
+    # Helpers
+    # ════════════════════════════════════════════════════════════
+
+    @staticmethod
+    def _pretty_date(iso: str, weekday: bool = False) -> str:
+        try:
+            d = date.fromisoformat(iso)
+        except ValueError:
+            return iso
+        text = f"{d.day} {d.strftime('%b %Y')}"
+        return f"{d.strftime('%a')}, {text}" if weekday else text
 
     def _build_constraints_summary(self, state: PlanState) -> str:
-        """Build constraints text for prompts."""
         parts = []
         if state.budget is not None:
-            parts.append(f"Budget: ₹{state.budget:.0f}")
+            parts.append(
+                f"Budget: {money.format_money(state.budget, state.currency)} "
+                f"({state.currency or 'currency unspecified'}) total per person"
+            )
         if state.duration_days is not None:
-            parts.append(f"Duration: {state.duration_days} day(s)")
+            parts.append(f"Duration: exactly {state.duration_days} day(s)")
+        if state.start_date:
+            dates = f"Dates: {state.start_date}"
+            if state.end_date:
+                dates += f" to {state.end_date}"
+            try:
+                dates += f" (starts on a {date.fromisoformat(state.start_date).strftime('%A')})"
+            except ValueError:
+                pass
+            parts.append(dates)
         if state.preferences:
             parts.append(f"Preferences: {', '.join(state.preferences)}")
         if state.interests:
@@ -926,22 +1456,17 @@ class PlanningAgent:
             return None
         if isinstance(value, (int, float)):
             return float(value)
-        try:
-            cleaned = str(value).replace("£", "").replace("$", "").replace("₹", "").replace(",", "").strip()
-            if cleaned and cleaned.lower() not in ("free", "?", "unknown", ""):
-                return float(cleaned)
-        except (ValueError, TypeError):
-            pass
+        text = str(value).strip().lower()
+        if text == "free":
+            return 0.0
+        match = re.search(r"\d+(?:\.\d+)?", text.replace(",", ""))
+        if match:
+            try:
+                return float(match.group(0))
+            except ValueError:
+                return None
         return None
 
     @staticmethod
-    def _estimate_meal_cost(pricerange: Optional[str]) -> Optional[float]:
-        """Estimate meal cost from MultiWOZ pricerange."""
-        mapping = {
-            "cheap": 200.0,
-            "moderate": 500.0,
-            "expensive": 1000.0,
-        }
-        if pricerange:
-            return mapping.get(pricerange.lower(), 400.0)
-        return 400.0
+    def _estimate_meal_cost(pricerange: Optional[str], currency: Optional[str] = None) -> float:
+        return money.estimate_meal_cost(pricerange, currency)

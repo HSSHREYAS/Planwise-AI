@@ -28,7 +28,7 @@ class APIClient:
             resp.raise_for_status()
             return resp.json()
         except requests.ConnectionError:
-            return {"status": "unavailable", "service": "planwise-api", "ollama_available": False}
+            return {"status": "unavailable", "service": "planwise-api", "llm_available": False}
         except Exception as e:
             return {"status": "error", "service": "planwise-api", "error": str(e)}
 

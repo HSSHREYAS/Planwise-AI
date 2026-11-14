@@ -9,6 +9,7 @@ Based on Architecture doc Section 12.
 import logging
 from typing import List, Optional
 
+from app.money import format_money, tight_daily_budget
 from app.models.schemas import (
     ConstraintResult,
     Plan,
@@ -26,8 +27,8 @@ def check_budget(plan: Plan, budget: Optional[float]) -> List[str]:
 
     if plan.estimated_total_cost > budget:
         violations.append(
-            f"Estimated cost ₹{plan.estimated_total_cost:.0f} "
-            f"exceeds budget ₹{budget:.0f}"
+            f"Estimated cost {format_money(plan.estimated_total_cost, plan.currency)} "
+            f"exceeds budget {format_money(budget, plan.currency)}"
         )
     return violations
 
@@ -63,7 +64,7 @@ def check_preferences(plan: Plan, preferences: List[str]) -> List[str]:
     # Check vegetarian preference
     if "vegetarian" in preferences and restaurant_activities:
         for activity in restaurant_activities:
-            food_type = activity.details.get("food", "").lower()
+            food_type = str(activity.details.get("food") or "").lower()
             name_lower = activity.name.lower()
             # Flag if explicitly non-vegetarian
             non_veg_indicators = [
@@ -118,11 +119,12 @@ def check_impossible_constraints(state: PlanState) -> List[str]:
     if state.budget is not None and state.duration_days is not None:
         # Very rough heuristic: < 500 per day is extremely tight
         per_day = state.budget / max(state.duration_days, 1)
-        if per_day < 300:
+        if per_day < tight_daily_budget(state.currency):
             warnings.append(
-                f"Budget of ₹{state.budget:.0f} for {state.duration_days} "
-                f"day(s) (₹{per_day:.0f}/day) is very tight and may not "
-                f"allow for a complete plan"
+                f"Budget of {format_money(state.budget, state.currency)} for "
+                f"{state.duration_days} day(s) "
+                f"({format_money(per_day, state.currency)}/day) is very tight and "
+                f"may not allow for a complete plan"
             )
 
     # Count requested attractions if mentioned

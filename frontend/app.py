@@ -459,7 +459,7 @@ with st.sidebar:
             '<div class="status-badge status-connected">● Backend Connected</div>',
             unsafe_allow_html=True,
         )
-        if health.get("ollama_available"):
+        if health.get("llm_available"):
             st.markdown(
                 '<div class="status-badge status-connected">● AI Model Ready</div>',
                 unsafe_allow_html=True,
@@ -531,7 +531,7 @@ with st.sidebar:
 
     st.divider()
     st.markdown(
-        '<div class="footer-text">Qwen2.5-3B · Ollama · FAISS · MultiWOZ 2.2</div>',
+        '<div class="footer-text">Hosted LLM API · OpenStreetMap live data · FastAPI</div>',
         unsafe_allow_html=True,
     )
 
@@ -552,7 +552,7 @@ if not st.session_state.messages:
             <span class="suggestion-chip">🏨 Find hotels in the centre</span>
             <span class="suggestion-chip">🍽️ Cheap restaurants in the south</span>
             <span class="suggestion-chip">🎯 Attractions to visit</span>
-            <span class="suggestion-chip">📅 Plan a 2-day Cambridge trip</span>
+            <span class="suggestion-chip">📅 Plan a 2-day trip to Jaipur</span>
             <span class="suggestion-chip">📚 Create a study schedule</span>
         </div>
     </div>

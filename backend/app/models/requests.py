@@ -38,9 +38,28 @@ class SessionResponse(BaseModel):
 
 # ── Messages ────────────────────────────────────────────────────
 
+class MessageContext(BaseModel):
+    """
+    Optional structured context sent by the UI with a message:
+    the location picked in the search bar (or the user's current
+    location) and the selected travel dates.
+    """
+    location: Optional[str] = Field(default=None, max_length=200)
+    lat: Optional[float] = Field(default=None, ge=-90, le=90)
+    lon: Optional[float] = Field(default=None, ge=-180, le=180)
+    start_date: Optional[str] = None
+    end_date: Optional[str] = None
+    explicit: bool = Field(
+        default=False,
+        description="True when the user picked these values for this very request "
+                    "(search bar); False when it is only the ambient/default location.",
+    )
+
+
 class MessageRequest(BaseModel):
     """Request to send a message to the planning agent."""
-    message: str = Field(min_length=1, description="User's natural language message")
+    message: str = Field(min_length=1, max_length=2000, description="User's natural language message")
+    context: Optional[MessageContext] = None
 
 
 # ── Replan ──────────────────────────────────────────────────────
@@ -68,7 +87,28 @@ class HealthResponse(BaseModel):
     """Health check response."""
     status: str = "ok"
     service: str = "planwise-api"
-    ollama_available: bool = False
+    llm_available: bool = False
+    llm_provider: str = ""
+    llm_model: str = ""
+    llm_chain: List[str] = Field(default_factory=list)
+    limited_mode: bool = Field(
+        default=False,
+        description="True when only the keyless, rate-limited LLM endpoint is configured",
+    )
+
+
+# ── Geo ─────────────────────────────────────────────────────────
+
+class PlaceResponse(BaseModel):
+    """A geocoded place for the location picker."""
+    name: str
+    label: str
+    display_name: str = ""
+    lat: float
+    lon: float
+    country: str = ""
+    country_code: str = ""
+    currency: str = ""
 
 
 # ── Plan ────────────────────────────────────────────────────────
