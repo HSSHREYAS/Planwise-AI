@@ -166,27 +166,42 @@ def search(query: str, limit: int = 5) -> List[Place]:
         return _cache[key]
 
     try:
-        items = _request("/search", {"q": query, "limit": limit})
+        # ask for a few extra rows: a district and the city of the same name
+        # often both match, and we want the city
+        items = _request("/search", {"q": query, "limit": max(limit, 8)})
     except Exception as e:
         logger.warning(f"Geocoding failed for '{query}': {e}")
         return []
 
     places: List[Place] = []
-    seen = set()
+    index_by_key: Dict[Any, int] = {}
     for item in items:
         try:
             place = _to_place(item)
         except (KeyError, TypeError, ValueError):
             continue
         dedupe_key = (place.name.lower(), place.state.lower(), place.country_code)
-        if dedupe_key in seen:
+        if dedupe_key in index_by_key:
+            # Same name twice (e.g. "Udupi" the district and "Udupi" the city):
+            # keep the actual settlement - a district's centre can be far from town.
+            existing = places[index_by_key[dedupe_key]]
+            if place.kind in SETTLEMENT_KINDS and existing.kind not in SETTLEMENT_KINDS:
+                places[index_by_key[dedupe_key]] = place
             continue
-        seen.add(dedupe_key)
+        index_by_key[dedupe_key] = len(places)
         places.append(place)
-        remember(place)
 
+    places = places[:limit]
+    for place in places:
+        remember(place)
     _cache[key] = places
     return places
+
+
+SETTLEMENT_KINDS = {
+    "city", "town", "village", "municipality", "hamlet", "suburb", "city_district",
+    "borough", "neighbourhood", "quarter", "local_authority", "current_location",
+}
 
 
 def geocode(query: str) -> Optional[Place]:

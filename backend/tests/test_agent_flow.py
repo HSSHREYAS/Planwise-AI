@@ -578,3 +578,52 @@ class TestCancellation:
             bad = client.post(f"/api/v1/sessions/{sid}/messages",
                               json={"message": "hi", "request_id": "bad id!"})
             assert bad.status_code == 422
+
+
+class TestGroupSearchAndSparseData:
+    """Stays / dining searches for a group, and towns with little map data."""
+
+    def test_stay_search_on_existing_plan_is_a_search(self):
+        state = PlanState()
+        agent = agent_with(two_day_plan())
+        agent.handle_message("Plan a 2 day trip to Jaipur", state)
+        res = agent.handle_message("Show me best places to stay with proper budget for 13 people", state)
+        assert res.status == ResponseStatus.COMPLETED
+        assert res.results_domain == "hotel" and res.results
+        assert state.travelers == 13
+        # the existing plan was not rewritten
+        assert state.current_plan is not None and state.current_plan.travelers == 1
+
+    def test_hotel_results_carry_group_estimates(self):
+        state = PlanState()
+        res = agent_with(fail=True).handle_message("hotels in Jaipur for 13 people", state)
+        hotel = res.results[0]
+        rooms, nights = 7, 1
+        assert hotel["est_group_cost"] == hotel["est_cost_per_person"] * 13 or \
+            abs(hotel["est_group_cost"] / 13 - hotel["est_cost_per_person"]) < 0.01
+        assert f"{rooms} rooms" in hotel["est_cost"] and f"{nights} night" in hotel["est_cost"]
+        assert "13 travellers need about 7 rooms" in res.message
+
+    def test_results_checked_against_group_budget(self):
+        state = PlanState()
+        res = agent_with(fail=True).handle_message(
+            "restaurants in Jaipur for 4 people under 1000 rupees", state)
+        assert all("within_budget" in r for r in res.results)
+        flags = [r["within_budget"] for r in res.results]
+        assert flags == sorted(flags, reverse=True)      # affordable first
+
+    def test_budget_sets_price_level(self):
+        agent = agent_with()
+        tight = PlanState(budget=6000, travelers=4, duration_days=2, currency="INR")
+        rich = PlanState(budget=400000, travelers=2, duration_days=2, currency="INR")
+        assert agent._level_for_budget(tight) == "cheap"
+        assert agent._level_for_budget(rich) == "expensive"
+        assert agent._level_for_budget(PlanState()) == "moderate"
+
+    def test_placeholder_days_do_not_zero_the_total(self, monkeypatch):
+        sparse = {"attraction": [dict(LIVE["attraction"][0])], "restaurant": [], "hotel": []}
+        monkeypatch.setattr(places, "fetch_places",
+                            lambda place, domains: {d: [dict(r) for r in sparse.get(d, [])] for d in domains})
+        res = agent_with(fail=True).handle_message("Plan a 3 day trip to Jaipur for 13 people", PlanState())
+        assert res.plan is not None and len(res.plan.days) == 3
+        assert res.plan.estimated_total_cost != 0

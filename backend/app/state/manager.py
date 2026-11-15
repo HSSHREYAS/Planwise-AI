@@ -258,7 +258,7 @@ class StateManager:
         detail_keys = [
             "type", "food", "area", "pricerange", "stars", "vegetarian",
             "entrance_fee", "price", "departure", "destination", "leaveAt",
-            "arriveBy", "duration", "code", "opening_hours", "address",
+            "arriveBy", "duration", "code", "opening_hours", "address", "est_cost",
         ]
         parts = []
         for domain, records in state.chosen_options.items():

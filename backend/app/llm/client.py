@@ -23,7 +23,7 @@ import json
 import logging
 import re
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Type
 
 import requests
@@ -45,6 +45,16 @@ class Provider:
     extra_headers: Optional[Dict[str, str]] = None
     extra_payload: Optional[Dict[str, Any]] = None
     timeout: Optional[int] = None
+    fallback_models: List[str] = field(default_factory=list)
+
+
+# Known-good models to fall back to when a provider retires the configured one
+GROQ_FALLBACK_MODELS = ["openai/gpt-oss-120b", "qwen/qwen3.8-27b", "openai/gpt-oss-20b"]
+GEMINI_FALLBACK_MODELS = ["gemini-3.5-flash", "gemini-3.5-flash-lite", "gemini-flash-latest"]
+
+
+def _fallbacks(configured: str, candidates: List[str]) -> List[str]:
+    return [m for m in candidates if m != configured]
 
 
 def _known_providers() -> Dict[str, Provider]:
@@ -54,12 +64,14 @@ def _known_providers() -> Dict[str, Provider]:
             url="https://api.groq.com/openai/v1/chat/completions",
             model=config.GROQ_MODEL,
             api_key=config.GROQ_API_KEY,
+            fallback_models=_fallbacks(config.GROQ_MODEL, GROQ_FALLBACK_MODELS),
         ),
         "gemini": Provider(
             name="gemini",
             url="https://generativelanguage.googleapis.com/v1beta/openai/chat/completions",
             model=config.GEMINI_MODEL,
             api_key=config.GEMINI_API_KEY,
+            fallback_models=_fallbacks(config.GEMINI_MODEL, GEMINI_FALLBACK_MODELS),
         ),
         "openrouter": Provider(
             name="openrouter",
@@ -147,6 +159,7 @@ class LLMClient:
         self.max_retries = max_retries
         self._cooldown_until: Dict[str, float] = {}
         self.last_provider: Optional[str] = None
+        self.last_errors: Dict[str, str] = {}   # provider → most recent failure (for /health)
         self._availability: Optional[bool] = None
         self._availability_checked_at: float = 0.0
 
@@ -237,12 +250,14 @@ class LLMClient:
                 content = self._call(provider, messages, temperature, max_tokens, json_mode)
                 if content:
                     self.last_provider = provider.name
+                    self.last_errors.pop(provider.name, None)
                     self._availability = True
                     self._availability_checked_at = time.time()
                     return content
                 errors.append(f"{provider.name}: empty response")
             except Exception as e:
                 errors.append(f"{provider.name}: {e}")
+                self.last_errors[provider.name] = str(e)[:220]
                 logger.warning(f"LLM provider {provider.name} failed: {str(e)[:160]}")
                 cooldown = getattr(e, "retry_after", None) or self.COOLDOWN_SECONDS
                 self._cooldown_until[provider.name] = time.time() + cooldown
@@ -297,6 +312,21 @@ class LLMClient:
             break
 
         if resp.status_code >= 400:
+            # Providers retire models regularly ("does not exist", "no longer
+            # available to new users", "decommissioned"): move on to the next
+            # known-good model for this provider and retry once.
+            body = resp.text.lower()
+            retired = resp.status_code in (400, 404) and any(
+                phrase in body for phrase in (
+                    "does not exist", "no longer available", "decommissioned",
+                    "not found", "not supported", "deprecated", "model_not_found",
+                )
+            )
+            if retired and provider.fallback_models:
+                old = provider.model
+                provider.model = provider.fallback_models.pop(0)
+                logger.warning(f"{provider.name}: model {old} unavailable, switching to {provider.model}")
+                return self._call(provider, messages, temperature, max_tokens, json_mode)
             raise RuntimeError(f"HTTP {resp.status_code}: {resp.text[:200]}")
 
         # The keyless endpoint allows ~1 reply per 45s per IP: pace ourselves

@@ -181,8 +181,10 @@ class TestPlacesNormalization:
         monkeypatch.setattr(geocoder, "category_search", fake_search)
         monkeypatch.setattr(places, "_cache", {})
         places.fetch_places(MYSURU, ["restaurant"])
+        first = len(calls)          # 1 result < MIN_RESULTS, so a wider second search runs
+        assert calls == ["restaurant"] * first and first == 2
         places.fetch_places(MYSURU, ["restaurant"])
-        assert calls == ["restaurant"]
+        assert len(calls) == first  # served from cache
 
     def test_public_record_hides_internal_fields(self):
         assert places.public_record({"name": "A", "_score": 3}) == {"name": "A"}

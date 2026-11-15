@@ -255,6 +255,9 @@ Write a short, helpful answer in markdown:
 
 RULES:
 - Mention ONLY places from the verified results and copy their names exactly.
+- When a result has "est_cost", include that estimate for it (it is already worked out for the
+  whole group and per person) and say once that prices are rough estimates. If a group budget is
+  given, recommend options whose estimate fits it and say which ones do not.
 - Do NOT invent phone numbers, prices, ratings or addresses that are not in the data.
 - If the user's preference (e.g. vegetarian, cheap) cannot be confirmed from the data, say so briefly.
 - Keep it under 180 words."""

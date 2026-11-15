@@ -65,6 +65,10 @@ _NEAR_ME = re.compile(
     r"my\s+(current\s+)?location|where\s+i\s+am|near\s+here)\b",
     re.IGNORECASE,
 )
+_VERBS_NOT_PLACES = {
+    "stay", "eat", "visit", "see", "go", "explore", "relax", "shop", "dine", "sleep",
+    "travel", "plan", "book", "find", "show", "try", "spend", "hang", "chill", "party",
+}
 _NOT_A_PLACE = {
     "me", "here", "nearby", "near me", "my location", "current location",
     "my current location", "the area", "town", "the city", "the centre", "the center",
@@ -131,6 +135,9 @@ class PlanningAgent:
                 is_modification = had_plan
                 if not had_plan:
                     intent.intent = "trip_planning"
+
+            if intent.intent in SEARCH_INTENTS:
+                is_modification = False   # looking something up never edits the plan
 
             state = self.state_manager.update_from_intent(state, intent)
             self._resolve_travelers(state, intent, context)
@@ -233,8 +240,28 @@ class PlanningAgent:
             logger.warning(f"LLM intent extraction failed, using rules: {str(e)[:120]}")
             return self._fallback_intent(message, state)
 
+        # Cross-check the model with the rule-based reading of the same message
+        rule = self._fallback_intent(message, state)
         if result.intent not in KNOWN_INTENTS:
-            result.intent = self._fallback_intent(message, state).intent
+            result.intent = rule.intent
+        # "show me places to stay / eat ..." is a search even when a plan already
+        # exists - never turn it into a rewrite of that plan
+        names_a_plan = re.search(r"\b(plan|itinerary|trip|schedule|tour)\b", message.lower())
+        if rule.intent in SEARCH_INTENTS and result.intent not in SEARCH_INTENTS and not names_a_plan:
+            result.intent = rule.intent
+            result.is_modification = False
+        # Numbers the model skipped are taken from the rules (never overwritten)
+        if result.travelers is None:
+            result.travelers = rule.travelers
+        if result.budget is None and rule.budget is not None:
+            result.budget = rule.budget
+            result.budget_per_person = rule.budget_per_person
+        if result.duration_days is None:
+            result.duration_days = rule.duration_days
+        for pref in rule.preferences:
+            if pref not in result.preferences:
+                result.preferences.append(pref)
+
         if result.location and not self._looks_like_place(result.location):
             result.location = None
         logger.info(f"Intent extracted: {result.intent} (location={result.location})")
@@ -243,6 +270,10 @@ class PlanningAgent:
     @staticmethod
     def _looks_like_place(text: str) -> bool:
         cleaned = text.strip().lower().strip(".,!?")
+        # "places to stay", "where to eat" ... the word after "to" is a verb, not a city
+        first_word = cleaned.split()[0] if cleaned else ""
+        if first_word in _VERBS_NOT_PLACES:
+            return False
         if not cleaned or cleaned in _NOT_A_PLACE or _NEAR_ME.search(cleaned):
             return False
         if tool_common.strip_area_words(cleaned).lower() in tool_common.LOCAL_AREAS:
@@ -357,7 +388,13 @@ class PlanningAgent:
                 preferences.append(word)
         if re.search(r"\bveg\b", msg_lower) and "vegetarian" not in preferences:
             preferences.append("vegetarian")
-        if re.search(r"\b(budget|affordable|inexpensive|low[- ]cost)\b", msg_lower) and budget is None \
+        # "budget hotels", "budget-friendly", "on a budget" = cheap;
+        # "with proper budget" / "budget breakdown" are not a price preference
+        if re.search(
+            r"\b(budget[- ](?:friendly|hotels?|stays?|trip|options?|places?|restaurants?|food|travel)"
+            r"|on\s+a\s+(?:tight\s+)?budget|affordable|inexpensive|low[- ]cost)\b",
+            msg_lower,
+        ) and budget is None \
                 and "cheap" not in preferences:
             preferences.append("cheap")
         star_match = re.search(r"\b([3-5])[- ]?star", msg_lower)
@@ -790,6 +827,7 @@ class PlanningAgent:
                 lookup_failed = True
 
         notice = None
+        results = self._annotate_group_costs(domain, results, state)
 
         # No verified results → honest AI-knowledge suggestions
         if not results:
@@ -838,6 +876,127 @@ class PlanningAgent:
             results=results[:8], results_domain=domain, notice=notice,
         )
 
+    # ── Group cost estimates for stays and dining ────────────────
+
+    @staticmethod
+    def _price_level_of(domain: str, rec: Dict[str, Any], preferred: Optional[str]) -> str:
+        """cheap / moderate / expensive for a record, from whatever the data carries."""
+        if rec.get("pricerange") in ("cheap", "moderate", "expensive"):
+            return rec["pricerange"]
+        kind = str(rec.get("type") or "").lower()
+        if domain == "hotel":
+            try:
+                stars = int(str(rec.get("stars") or "0")[:1])
+            except ValueError:
+                stars = 0
+            if stars >= 4 or kind == "resort":
+                return "expensive"
+            if stars == 3:
+                return "moderate"
+            if stars in (1, 2) or kind in ("hostel", "guest house", "guesthouse", "motel"):
+                return "cheap"
+        if domain == "restaurant" and kind in ("fast food", "cafe", "food court"):
+            return "cheap"
+        return preferred or "moderate"
+
+    @staticmethod
+    def _level_for_budget(state: PlanState) -> str:
+        """
+        Price level each traveller's share of the budget can afford per day
+        (two meals plus half a room). No budget → moderate.
+        """
+        if state.budget is None:
+            return "moderate"
+        travelers = money.clamp_travelers(state.travelers or 1)
+        days = max(state.duration_days or 1, 1)
+        per_person_day = state.budget / travelers / days
+        currency = state.currency
+
+        def daily(level: str) -> float:
+            return money.estimate_meal_cost(level, currency) * 2 + money.estimate_hotel_cost(level, currency) / 2
+
+        if per_person_day >= daily("expensive"):
+            return "expensive"
+        if per_person_day >= daily("moderate"):
+            return "moderate"
+        return "cheap"
+
+    def _stay_nights(self, state: PlanState) -> int:
+        return max((state.duration_days or 2) - 1, 1)
+
+    def _annotate_group_costs(
+        self, domain: str, results: List[Dict[str, Any]], state: PlanState
+    ) -> List[Dict[str, Any]]:
+        """
+        Add an estimated cost for the whole group (and each person's share) to
+        hotel and restaurant results, check it against the group budget, and
+        put affordable options first.
+        """
+        if domain not in ("hotel", "restaurant") or not results:
+            return results
+
+        currency = state.currency
+        travelers = money.clamp_travelers(state.travelers or 1)
+        preferred = tool_common.price_level(None, state.preferences) or (
+            self._level_for_budget(state) if state.budget is not None else None
+        )
+        fmt = lambda v: money.format_money(v, currency)  # noqa: E731
+
+        for rec in results:
+            level = self._price_level_of(domain, rec, preferred)
+            if domain == "hotel":
+                rooms = money.rooms_needed(travelers)
+                nights = self._stay_nights(state)
+                per_room = money.estimate_hotel_cost(level, currency)
+                group_total = per_room * rooms * nights
+                text = f"≈ {fmt(per_room)}/room/night"
+                if travelers > 1 or nights > 1:
+                    text += (f" · {rooms} room{'s' if rooms > 1 else ''} × {nights} night"
+                             f"{'s' if nights > 1 else ''} ≈ {fmt(group_total)}")
+                if travelers > 1:
+                    text += f" ({fmt(group_total / travelers)} each)"
+            else:
+                per_person = money.estimate_meal_cost(level, currency)
+                group_total = per_person * travelers
+                text = f"≈ {fmt(per_person)} per person"
+                if travelers > 1:
+                    text += f" · ≈ {fmt(group_total)} for {travelers}"
+
+            rec["price_level"] = level
+            rec["est_group_cost"] = round(group_total, 2)
+            rec["est_cost_per_person"] = round(group_total / travelers, 2)
+            rec["est_cost"] = text
+            if state.budget is not None:
+                rec["within_budget"] = group_total <= state.budget
+
+        if state.budget is not None:
+            # affordable options first, cheapest group cost breaking ties in the over-budget tail
+            results.sort(key=lambda r: (not r.get("within_budget", True),
+                                        r["est_group_cost"] if not r.get("within_budget", True) else 0))
+        return results
+
+    def _group_search_header(self, domain: str, state: PlanState) -> Optional[str]:
+        """One line explaining how the estimates were worked out."""
+        travelers = money.clamp_travelers(state.travelers or 1)
+        parts = []
+        if domain == "hotel":
+            rooms = money.rooms_needed(travelers)
+            nights = self._stay_nights(state)
+            if travelers > 1:
+                parts.append(f"{travelers} travellers need about {rooms} room{'s' if rooms > 1 else ''} "
+                             f"(2 per room)")
+            parts.append(f"{nights} night{'s' if nights > 1 else ''}")
+        elif domain == "restaurant" and travelers > 1:
+            parts.append(f"meal costs for {travelers} travellers")
+        else:
+            return None
+        line = "👥 " + " · ".join(parts)
+        if state.budget is not None:
+            line += (f" · group budget {money.format_money(state.budget, state.currency)}"
+                     + (f" ({money.format_money(state.budget / travelers, state.currency)} each)"
+                        if travelers > 1 else ""))
+        return line + ". Prices are rough estimates by category, not live rates."
+
     def _format_search_results(
         self, domain: str, results: List[dict], state: Optional[PlanState] = None
     ) -> str:
@@ -876,8 +1035,16 @@ class PlanningAgent:
             if rec.get("distance_km") is not None:
                 parts.append(f"{rec['distance_km']} km from centre")
             name = rec.get("name") or rec.get("trainID") or rec.get("train_id") or "Option"
-            lines.append(f"{i}. **{name}** - {', '.join(parts) if parts else 'details on the map'}")
+            line = f"{i}. **{name}** - {', '.join(parts) if parts else 'details on the map'}"
+            if rec.get("est_cost"):
+                line += f" - 💰 {rec['est_cost']}"
+                if rec.get("within_budget") is False:
+                    line += " (over budget)"
+            lines.append(line)
 
+        header = self._group_search_header(domain, state) if state else None
+        if header:
+            lines.append(f"\n{header}")
         source = self._data_source_label(state) if state else "verified data"
         lines.append(f"\n_Source: {source}_")
         return "\n".join(lines)
@@ -1155,7 +1322,10 @@ class PlanningAgent:
             # Activity costs are per person (hotels: per room per night); the
             # total is what the whole group pays, split evenly per person.
             travelers = money.clamp_travelers(state.travelers or 1)
-            priced = [a for d in days for s in d.slots for a in s.activities if a.estimated_cost is not None]
+            priced = [
+                a for d in days for s in d.slots for a in s.activities
+                if a.estimated_cost is not None and a.details.get("source") != "placeholder"
+            ]
             plan.travelers = travelers
             plan.rooms = money.rooms_needed(travelers) if any(a.type == "hotel" for a in priced) else None
             if priced:
@@ -1244,7 +1414,7 @@ class PlanningAgent:
 
         currency = state.currency
         duration = state.duration_days or 1
-        level = tool_common.price_level(None, state.preferences) or "moderate"
+        level = tool_common.price_level(None, state.preferences) or self._level_for_budget(state)
 
         def attraction(rec: Dict[str, Any], start_time: str) -> PlanActivity:
             return PlanActivity(

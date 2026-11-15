@@ -13,6 +13,7 @@ memory for an hour.
 
 import logging
 import math
+import re
 import time
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -38,7 +39,21 @@ _SIGHT_TYPES = {
     "aquarium", "artwork",
 }
 
+MIN_RESULTS = 3          # fewer than this → retry with a wider search area
+WIDE_RADIUS_M = 25000
+
 CACHE_TTL_SECONDS = 3600
+
+# University / college dorms are mapped as "hostel" but are not for travellers
+_STUDENT_HOUSING = re.compile(
+    r"^\s*(?:block\s*[\w-]*|\d+\s*(?:st|nd|rd|th)?\s*block)\s*$"
+    r"|\bblock\s*\d+\b|\b\d+(?:st|nd|rd|th)\s+block\b"
+    r"|hall of residence|\bdorm(?:itory)?\b"
+    r"|\b(?:boys|girls|ladies|gents|men'?s|women'?s|students?|college|university|pg)\b.*\bhostel\b"
+    r"|\bhostel\b.*\b(?:boys|girls|ladies|gents|students?|college|university)\b",
+    re.IGNORECASE,
+)
+
 _cache: Dict[str, Tuple[float, List[Dict[str, Any]]]] = {}
 
 
@@ -119,6 +134,8 @@ def _normalize(item: Dict[str, Any], domain: str, place: Place) -> Optional[Dict
     }
 
     if domain == "hotel":
+        if kind == "hostel" and _STUDENT_HOUSING.search(name):
+            return None
         record["type"] = kind.replace("_", " ")
         stars = str(tags.get("stars", "")).strip()
         if stars[:1].isdigit():
@@ -193,24 +210,31 @@ def _fetch_domain(domain: str, place: Place) -> Optional[List[Dict[str, Any]]]:
         radius = min(max(place.radius_m, 2500), max_radius)
     else:
         radius = max_radius if domain == "transport" else min(max(place.radius_m, 6000), max_radius)
-    viewbox = _viewbox(place, radius)
-
     found: Dict[str, Dict[str, Any]] = {}
     any_success = False
-    for term in terms:
-        items = geocoder.category_search(term, viewbox, limit=40)
-        if items is None:
-            continue
-        any_success = True
-        for item in items:
-            if _classify(item) != domain:
+
+    def collect(search_radius: int) -> None:
+        nonlocal any_success
+        viewbox = _viewbox(place, search_radius)
+        for term in terms:
+            items = geocoder.category_search(term, viewbox, limit=40)
+            if items is None:
                 continue
-            record = _normalize(item, domain, place)
-            if record is None:
-                continue
-            key = record["name"].lower()
-            if key not in found or record["_score"] > found[key]["_score"]:
-                found[key] = record
+            any_success = True
+            for item in items:
+                if _classify(item) != domain:
+                    continue
+                record = _normalize(item, domain, place)
+                if record is None:
+                    continue
+                key = record["name"].lower()
+                if key not in found or record["_score"] > found[key]["_score"]:
+                    found[key] = record
+
+    collect(radius)
+    # Small towns and spread-out places: look further out before giving up
+    if any_success and len(found) < MIN_RESULTS and radius < WIDE_RADIUS_M:
+        collect(WIDE_RADIUS_M)
 
     if not any_success:
         return None

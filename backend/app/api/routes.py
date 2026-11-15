@@ -48,7 +48,7 @@ def health_check(probe: bool = Query(default=False, description="Actively test t
     """
     llm = get_llm_client()
     if probe:
-        available = llm.is_available()
+        available = llm.is_available(max_age=0)
     else:
         available = llm._availability if llm._availability is not None else bool(llm.providers)
     return HealthResponse(
@@ -58,6 +58,7 @@ def health_check(probe: bool = Query(default=False, description="Actively test t
         llm_provider=llm.provider_name,
         llm_model=llm.model,
         llm_chain=llm.describe(),
+        llm_errors=dict(llm.last_errors),
         limited_mode=llm.frugal,
     )
 

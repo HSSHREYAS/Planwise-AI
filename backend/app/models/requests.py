@@ -96,6 +96,9 @@ class HealthResponse(BaseModel):
     llm_provider: str = ""
     llm_model: str = ""
     llm_chain: List[str] = Field(default_factory=list)
+    llm_errors: Dict[str, str] = Field(
+        default_factory=dict, description="Most recent failure per provider (to diagnose keys/models)"
+    )
     limited_mode: bool = Field(
         default=False,
         description="True when only the keyless, rate-limited LLM endpoint is configured",
