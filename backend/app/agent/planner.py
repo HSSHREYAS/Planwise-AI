@@ -589,7 +589,9 @@ class PlanningAgent:
             return Place(name=location or "Selected location", lat=float(lat), lon=float(lon))
         if location:
             short = location.split(",")[0].strip()
-            if short and short.lower() != place.name.lower() and place.kind != "current_location":
+            # Keep the name the user picked: the coordinates of a city centre
+            # often reverse-geocode to a neighbourhood (Udupi → "Manipal")
+            if short and short.lower() != place.name.lower():
                 place = place.model_copy(update={"name": short})
         return place
 

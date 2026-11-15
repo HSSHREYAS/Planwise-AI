@@ -627,3 +627,14 @@ class TestGroupSearchAndSparseData:
         res = agent_with(fail=True).handle_message("Plan a 3 day trip to Jaipur for 13 people", PlanState())
         assert res.plan is not None and len(res.plan.days) == 3
         assert res.plan.estimated_total_cost != 0
+
+
+class TestPickedPlaceName:
+    def test_picked_city_keeps_its_name(self, monkeypatch):
+        neighbourhood = JAIPUR.model_copy(update={"name": "Manipal", "kind": "current_location"})
+        monkeypatch.setattr(geocoder, "lookup", lambda lat, lon: None)
+        monkeypatch.setattr(geocoder, "reverse", lambda lat, lon: neighbourhood)
+        res = agent_with(fail=True).handle_message(
+            "Find hotels", PlanState(),
+            {"location": "Udupi, India", "lat": 13.34, "lon": 74.75, "explicit": True})
+        assert res.context["location"].startswith("Udupi")

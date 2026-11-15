@@ -294,10 +294,17 @@
   <!-- =====================================================================
        MAIN VIEW 2: CHAT & ITINERARY PLANNER
        ===================================================================== -->
-  <main id="view-planner">
+  <main id="view-planner" data-tab="chat">
+    <!-- Phone / tablet: switch between the chat and the plan -->
+    <nav class="planner-tabs" role="tablist" aria-label="Planner sections">
+      <button type="button" class="planner-tab is-active" id="tab-chat" role="tab" aria-selected="true" aria-controls="chat-column" data-tab="chat">💬 Chat</button>
+      <button type="button" class="planner-tab" id="tab-plan" role="tab" aria-selected="false" aria-controls="itinerary-drawer" data-tab="plan">
+        📋 Plan &amp; Budget <span class="tab-badge" id="plan-badge" hidden></span>
+      </button>
+    </nav>
     <div class="container planner-container">
       <!-- Left Column: Interactive Chat -->
-      <div class="chat-column">
+      <div class="chat-column" id="chat-column" role="tabpanel" aria-labelledby="tab-chat">
         <!-- Chat Header -->
         <div class="chat-header">
           <div class="chat-header-title">
@@ -323,11 +330,11 @@
               <span aria-hidden="true">👥</span>
               <select id="chip-travellers" class="travellers-select" aria-label="Number of travellers"></select>
             </label>
-            <button class="btn-secondary" id="btn-new-chat" style="padding:6px 14px; font-size:0.82rem;">
-              ✨ New Chat
+            <button class="btn-secondary" id="btn-new-chat" title="Start a new chat" aria-label="New chat" style="padding:6px 14px; font-size:0.82rem;">
+              ✨ <span class="btn-label">New Chat</span>
             </button>
-            <button class="back-to-explore" id="btn-back-explore">
-              ← Explore
+            <button class="back-to-explore" id="btn-back-explore" title="Back to Explore" aria-label="Back to Explore">
+              ← <span class="btn-label">Explore</span>
             </button>
           </div>
         </div>
@@ -366,7 +373,7 @@
       </div>
 
       <!-- Right Column: Itinerary & Constraints Drawer -->
-      <aside class="itinerary-drawer">
+      <aside class="itinerary-drawer" id="itinerary-drawer" role="tabpanel" aria-labelledby="tab-plan">
         <div class="itinerary-header">
           <h3>📋 Active Plan & Budget</h3>
           <p>Schedule breakdown and constraint verification.</p>
@@ -379,37 +386,39 @@
         </div>
 
         <div id="itinerary-content" style="display:none;">
-          <div class="itinerary-stat-pill">
-            <span>📍 Location:</span>
-            <span id="plan-stat-location" style="color:var(--text-primary);">-</span>
-          </div>
-          <div class="itinerary-stat-pill" id="plan-stat-dates-row">
-            <span>🗓️ Dates:</span>
-            <span id="plan-stat-dates" style="color:var(--text-primary);">-</span>
-          </div>
-          <div class="itinerary-stat-pill">
-            <span>📅 Duration:</span>
-            <span id="plan-stat-duration" style="color:var(--text-primary);">-</span>
-          </div>
-          <div class="itinerary-stat-pill">
-            <span>👥 Travellers:</span>
-            <span id="plan-stat-travellers" style="color:var(--text-primary);">1</span>
-          </div>
-          <div class="itinerary-stat-pill">
-            <span>💰 Est. Cost:</span>
-            <span id="plan-stat-cost" style="color:var(--success);">-</span>
-          </div>
-          <div class="itinerary-stat-pill" id="plan-stat-share-row" style="display:none;">
-            <span>🧾 Per Person:</span>
-            <span id="plan-stat-share" style="color:var(--text-primary);">-</span>
-          </div>
-          <div class="itinerary-stat-pill" id="plan-stat-budget-row" style="display:none;">
-            <span>🎯 Budget:</span>
-            <span id="plan-stat-budget" style="color:var(--text-primary);">-</span>
-          </div>
-          <div class="itinerary-stat-pill">
-            <span>🛡️ Constraints:</span>
-            <span id="plan-stat-validation" style="color:var(--success);">✓ Verified</span>
+          <div class="plan-stats">
+            <div class="itinerary-stat-pill">
+              <span>📍 Location:</span>
+              <span id="plan-stat-location" style="color:var(--text-primary);">-</span>
+            </div>
+            <div class="itinerary-stat-pill" id="plan-stat-dates-row">
+              <span>🗓️ Dates:</span>
+              <span id="plan-stat-dates" style="color:var(--text-primary);">-</span>
+            </div>
+            <div class="itinerary-stat-pill">
+              <span>📅 Duration:</span>
+              <span id="plan-stat-duration" style="color:var(--text-primary);">-</span>
+            </div>
+            <div class="itinerary-stat-pill">
+              <span>👥 Travellers:</span>
+              <span id="plan-stat-travellers" style="color:var(--text-primary);">1</span>
+            </div>
+            <div class="itinerary-stat-pill">
+              <span>💰 Est. Cost:</span>
+              <span id="plan-stat-cost" style="color:var(--success);">-</span>
+            </div>
+            <div class="itinerary-stat-pill" id="plan-stat-share-row" style="display:none;">
+              <span>🧾 Per Person:</span>
+              <span id="plan-stat-share" style="color:var(--text-primary);">-</span>
+            </div>
+            <div class="itinerary-stat-pill" id="plan-stat-budget-row" style="display:none;">
+              <span>🎯 Budget:</span>
+              <span id="plan-stat-budget" style="color:var(--text-primary);">-</span>
+            </div>
+            <div class="itinerary-stat-pill">
+              <span>🛡️ Constraints:</span>
+              <span id="plan-stat-validation" style="color:var(--success);">✓ Verified</span>
+            </div>
           </div>
 
           <div id="plan-warnings" class="plan-warnings" hidden></div>

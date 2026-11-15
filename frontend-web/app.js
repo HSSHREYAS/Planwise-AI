@@ -250,10 +250,52 @@ function switchView(viewName) {
   viewPlanner.style.display = planner ? 'block' : 'none';
   navExplore.classList.toggle('active', !planner);
   navPlanner.classList.toggle('active', planner);
+  document.body.classList.toggle('in-planner', planner);
   window.scrollTo({ top: 0, behavior: 'smooth' });
   if (planner) {
-    chatInput.focus({ preventScroll: true });
+    // on phones the keyboard would cover half the screen: don't pop it up uninvited
+    if (!isCompactLayout()) chatInput.focus({ preventScroll: true });
     ensureSession();
+  }
+}
+
+/* ---------------------------------------------------------------------
+   Phone / tablet layout: the planner shows either the chat or the plan
+   --------------------------------------------------------------------- */
+const compactQuery = window.matchMedia('(max-width: 1024px)');
+
+function isCompactLayout() {
+  return compactQuery.matches;
+}
+
+function setPlannerTab(tab) {
+  const showPlan = tab === 'plan';
+  viewPlanner.dataset.tab = showPlan ? 'plan' : 'chat';
+  document.querySelectorAll('.planner-tab').forEach(btn => {
+    const active = btn.dataset.tab === viewPlanner.dataset.tab;
+    btn.classList.toggle('is-active', active);
+    btn.setAttribute('aria-selected', String(active));
+  });
+  if (showPlan) {
+    $('plan-badge').hidden = true;
+    $('itinerary-drawer').scrollTop = 0;
+  }
+  window.scrollTo({ top: 0 });
+}
+
+function setupPlannerTabs() {
+  document.querySelectorAll('.planner-tab').forEach(btn => {
+    btn.addEventListener('click', () => setPlannerTab(btn.dataset.tab));
+  });
+  // back to the chat whenever the screen switches between wide and compact
+  compactQuery.addEventListener('change', () => setPlannerTab('chat'));
+}
+
+function flagNewPlan() {
+  if (isCompactLayout() && viewPlanner.dataset.tab !== 'plan') {
+    const badge = $('plan-badge');
+    badge.hidden = false;
+    badge.textContent = 'new';
   }
 }
 
@@ -274,6 +316,7 @@ function setupNavigation() {
   });
 
   btnNewChat.addEventListener('click', resetChat);
+  setupPlannerTabs();
 }
 
 
@@ -677,6 +720,8 @@ async function resetChat() {
   itineraryContent.style.display = 'none';
   planTimelineContainer.innerHTML = '';
   lastPlanShown = false;
+  $('plan-badge').hidden = true;
+  setPlannerTab('chat');
   await ensureSession(true);
 }
 
@@ -722,7 +767,9 @@ function setupTravellers() {
   const options = Array.from({ length: MAX_TRAVELLERS }, (_, i) => i + 1)
     .map(n => `<option value="${n}">${travellersLabel(n)}</option>`).join('');
   searchTravellers.innerHTML = options;
-  chipTravellers.innerHTML = options;
+  // the chip already shows 👥, so just the number keeps the header compact
+  chipTravellers.innerHTML = Array.from({ length: MAX_TRAVELLERS }, (_, i) => i + 1)
+    .map(n => `<option value="${n}" aria-label="${travellersLabel(n)}">${n}</option>`).join('');
 
   try {
     const saved = Number(localStorage.getItem(TRAVELLERS_STORAGE_KEY));
@@ -1031,7 +1078,14 @@ function appendAssistantMessage(text, responseData) {
     html += `<div class="message-note">ℹ️ ${escapeHtml(notice)}</div>`;
   }
 
+  if (responseData.plan) {
+    // phones / tablets: jump straight to the plan tab (hidden on wide screens)
+    html += '<button type="button" class="view-plan-btn">📋 View full plan &amp; budget</button>';
+  }
+
   bubble.innerHTML = html;
+  const viewPlanBtn = bubble.querySelector('.view-plan-btn');
+  if (viewPlanBtn) viewPlanBtn.addEventListener('click', () => setPlannerTab('plan'));
   chatMessages.appendChild(row);
   // show the start of long answers instead of jumping past them
   // (scroll only the chat pane, never the whole page)
@@ -1156,6 +1210,7 @@ function renderItineraryDrawer(plan, validation, context) {
   const currency = plan.currency || context.currency || null;
   itineraryEmptyState.style.display = 'none';
   itineraryContent.style.display = 'block';
+  flagNewPlan();
 
   planStatLocation.textContent = plan.location || (plan.plan_type === 'study' ? 'Study schedule' : '-');
 
