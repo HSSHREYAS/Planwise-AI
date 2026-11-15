@@ -1,0 +1,18 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "planwise-backend",
+      "runtimeExecutable": "python",
+      "runtimeArgs": ["-m", "uvicorn", "app.main:app", "--app-dir", "backend", "--host", "127.0.0.1", "--port", "8010"],
+      "port": 8010
+    },
+    {
+      "name": "planwise-frontend",
+      "runtimeExecutable": "node",
+      "runtimeArgs": ["frontend-web/node_modules/vite/bin/vite.js", "frontend-web", "--port", "3000", "--strictPort"],
+      "env": { "BACKEND_PORT": "8010" },
+      "port": 3000
+    }
+  ]
+}

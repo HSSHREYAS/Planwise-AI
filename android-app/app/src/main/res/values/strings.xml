@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">PlanWise AI</string>
+    <string name="tagline">AI trip and itinerary planner</string>
+    <string name="loading">Loading…</string>
+    <string name="loading_slow">Waking up the server… the first open can take up to a minute.</string>
+    <string name="offline_title">Can\'t reach PlanWise AI</string>
+    <string name="offline_message">Check your internet connection and try again.</string>
+    <string name="retry">Try again</string>
+    <string name="location_denied">Location permission denied - you can still type any city.</string>
+    <string name="no_app_for_link">No app found to open this link.</string>
+    <string name="press_back_again">Press back again to exit</string>
+</resources>

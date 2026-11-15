@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Folded map with a location pin (108dp adaptive icon, art kept in the 66dp safe zone) -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <!-- folded map -->
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:fillAlpha="0.95"
+        android:pathData="M30,40 L44,35 L64,41 L78,36 L78,72 L64,77 L44,71 L30,76 Z" />
+    <path
+        android:fillColor="#FFF7C4D2"
+        android:pathData="M44,35 L64,41 L64,77 L44,71 Z" />
+    <!-- pin -->
+    <path
+        android:fillColor="#FFE31C5F"
+        android:strokeColor="#FFFFFFFF"
+        android:strokeWidth="2.5"
+        android:pathData="M54,30 C46.8,30 41,35.8 41,43 C41,52.5 54,66 54,66 C54,66 67,52.5 67,43 C67,35.8 61.2,30 54,30 Z" />
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:pathData="M54,38 m-5,0 a5,5 0 1,0 10,0 a5,5 0 1,0 -10,0" />
+</vector>
