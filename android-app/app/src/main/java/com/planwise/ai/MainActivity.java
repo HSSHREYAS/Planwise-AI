@@ -4,17 +4,24 @@ import android.Manifest;
 import android.annotation.SuppressLint;
 import android.app.Activity;
 import android.content.ActivityNotFoundException;
+import android.content.Context;
 import android.content.Intent;
 import android.content.pm.PackageManager;
 import android.graphics.Bitmap;
+import android.location.Location;
+import android.location.LocationListener;
+import android.location.LocationManager;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
+import android.util.Log;
 import android.view.View;
 import android.view.WindowInsets;
+import android.webkit.ConsoleMessage;
 import android.webkit.GeolocationPermissions;
+import android.webkit.JavascriptInterface;
 import android.webkit.WebChromeClient;
 import android.webkit.WebResourceError;
 import android.webkit.WebResourceRequest;
@@ -26,17 +33,22 @@ import android.widget.ProgressBar;
 import android.widget.TextView;
 import android.widget.Toast;
 
+import java.util.List;
+import java.util.Locale;
+import java.util.concurrent.Executor;
+
 /**
  * PlanWise AI - Android app.
  *
  * Opens the deployed PlanWise AI website in a full-screen WebView and adds
  * what a website alone cannot do well inside an app: a splash while the free
- * server wakes up, an offline screen with retry, location permission for
- * "use my current location", a sensible back button, and opening map /
- * website links in the right external app.
+ * server wakes up, an offline screen with retry, location permission & native
+ * location bridging for "use my current location", a sensible back button, and
+ * opening map / website links in the right external app.
  */
 public class MainActivity extends Activity {
 
+    private static final String TAG = "PlanWiseAI";
     private static final int LOCATION_REQUEST = 1001;
     private static final long SLOW_LOAD_HINT_MS = 6000;
 
@@ -50,16 +62,23 @@ public class MainActivity extends Activity {
     private boolean mainFrameFailed = false;
     private long lastBackPress = 0;
 
+    // Location management
+    private LocationManager locationManager;
+    private LocationListener activeLocationListener;
+
     // Pending website request for the user's location while Android asks for permission
     private String pendingGeoOrigin;
     private GeolocationPermissions.Callback pendingGeoCallback;
 
     private final Handler handler = new Handler(Looper.getMainLooper());
+    private final Executor mainExecutor = handler::post;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         setContentView(R.layout.activity_main);
+
+        locationManager = (LocationManager) getSystemService(Context.LOCATION_SERVICE);
 
         webView = findViewById(R.id.webview);
         progressBar = findViewById(R.id.progress);
@@ -106,12 +125,17 @@ public class MainActivity extends Activity {
         settings.setDomStorageEnabled(true);          // the site remembers location / travellers
         settings.setDatabaseEnabled(true);
         settings.setGeolocationEnabled(true);
+        try {
+            settings.setGeolocationDatabasePath(getFilesDir().getPath());
+        } catch (Throwable ignored) {}
         settings.setLoadWithOverviewMode(true);
         settings.setUseWideViewPort(true);
         settings.setSupportZoom(false);
         settings.setMediaPlaybackRequiresUserGesture(true);
         settings.setMixedContentMode(WebSettings.MIXED_CONTENT_NEVER_ALLOW);
         settings.setUserAgentString(settings.getUserAgentString() + " PlanWiseAndroid/" + BuildConfig.VERSION_NAME);
+
+        webView.addJavascriptInterface(new WebAppInterface(), "AndroidLocationBridge");
 
         webView.setWebViewClient(new WebViewClient() {
             @Override
@@ -122,6 +146,7 @@ public class MainActivity extends Activity {
             @Override
             public void onPageStarted(WebView view, String url, Bitmap favicon) {
                 mainFrameFailed = false;
+                injectGeolocationBridge();
             }
 
             @Override
@@ -129,6 +154,7 @@ public class MainActivity extends Activity {
                 if (!mainFrameFailed) {
                     firstPageLoaded = true;
                     showContent();
+                    injectGeolocationBridge();
                 }
             }
 
@@ -147,20 +173,28 @@ public class MainActivity extends Activity {
             public void onProgressChanged(WebView view, int newProgress) {
                 progressBar.setProgress(newProgress);
                 progressBar.setVisibility(newProgress < 100 && firstPageLoaded ? View.VISIBLE : View.GONE);
+                if (newProgress > 20) {
+                    injectGeolocationBridge();
+                }
             }
 
             @Override
             public void onGeolocationPermissionsShowPrompt(String origin, GeolocationPermissions.Callback callback) {
                 if (hasLocationPermission()) {
-                    callback.invoke(origin, true, false);
+                    callback.invoke(origin, true, true);
+                    requestFreshLocation();
                 } else {
                     pendingGeoOrigin = origin;
                     pendingGeoCallback = callback;
-                    requestPermissions(new String[]{
-                            Manifest.permission.ACCESS_FINE_LOCATION,
-                            Manifest.permission.ACCESS_COARSE_LOCATION,
-                    }, LOCATION_REQUEST);
+                    requestLocationPermissionIfNeeded();
                 }
+            }
+
+            @Override
+            public boolean onConsoleMessage(ConsoleMessage consoleMessage) {
+                Log.d("PlanWiseWeb", consoleMessage.message() + " -- Line "
+                        + consoleMessage.lineNumber() + " of " + consoleMessage.sourceId());
+                return true;
             }
         });
     }
@@ -216,24 +250,264 @@ public class MainActivity extends Activity {
         errorView.setVisibility(View.VISIBLE);
     }
 
+    // ── Location & Native Bridge ──────────────────────────────────────
+
     private boolean hasLocationPermission() {
         return checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED
                 || checkSelfPermission(Manifest.permission.ACCESS_COARSE_LOCATION) == PackageManager.PERMISSION_GRANTED;
     }
 
+    private void requestLocationPermissionIfNeeded() {
+        if (!hasLocationPermission()) {
+            requestPermissions(new String[]{
+                    Manifest.permission.ACCESS_FINE_LOCATION,
+                    Manifest.permission.ACCESS_COARSE_LOCATION,
+            }, LOCATION_REQUEST);
+        }
+    }
+
+    @SuppressLint("MissingPermission")
+    private Location getBestLastKnownLocation() {
+        if (!hasLocationPermission() || locationManager == null) {
+            return null;
+        }
+        Location bestLocation = null;
+        long bestTime = 0;
+        float bestAccuracy = Float.MAX_VALUE;
+
+        // On Android 12+, check fused provider first
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            try {
+                Location fused = locationManager.getLastKnownLocation(LocationManager.FUSED_PROVIDER);
+                if (fused != null) {
+                    bestLocation = fused;
+                    bestTime = fused.getTime();
+                    bestAccuracy = fused.hasAccuracy() ? fused.getAccuracy() : Float.MAX_VALUE;
+                }
+            } catch (Throwable ignored) {}
+        }
+
+        List<String> providers = locationManager.getProviders(true);
+        if (providers != null) {
+            for (String provider : providers) {
+                try {
+                    Location loc = locationManager.getLastKnownLocation(provider);
+                    if (loc == null) continue;
+
+                    long time = loc.getTime();
+                    float accuracy = loc.hasAccuracy() ? loc.getAccuracy() : Float.MAX_VALUE;
+
+                    boolean isSignificantlyNewer = (time - bestTime) > 600000L; // 10 minutes
+                    boolean isNewer = time > bestTime;
+                    boolean isMoreAccurate = accuracy < bestAccuracy;
+
+                    if (bestLocation == null || isSignificantlyNewer || (isNewer && isMoreAccurate)) {
+                        bestLocation = loc;
+                        bestTime = time;
+                        bestAccuracy = accuracy;
+                    }
+                } catch (Throwable ignored) {}
+            }
+        }
+        return bestLocation;
+    }
+
+    @SuppressLint("MissingPermission")
+    private void requestFreshLocation() {
+        if (!hasLocationPermission() || locationManager == null) {
+            return;
+        }
+
+        // 1. Immediately send cached location if available
+        Location cached = getBestLastKnownLocation();
+        if (cached != null) {
+            pushLocationToWeb(cached);
+        }
+
+        stopLocationUpdates();
+
+        // 2. Modern Android 11+ (API 30+): getCurrentLocation
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            try {
+                if (locationManager.isProviderEnabled(LocationManager.NETWORK_PROVIDER)) {
+                    locationManager.getCurrentLocation(
+                            LocationManager.NETWORK_PROVIDER,
+                            null,
+                            mainExecutor,
+                            this::pushLocationToWeb
+                    );
+                }
+                if (locationManager.isProviderEnabled(LocationManager.GPS_PROVIDER)) {
+                    locationManager.getCurrentLocation(
+                            LocationManager.GPS_PROVIDER,
+                            null,
+                            mainExecutor,
+                            this::pushLocationToWeb
+                    );
+                }
+                return;
+            } catch (Throwable e) {
+                Log.w(TAG, "getCurrentLocation failed, falling back to listener", e);
+            }
+        }
+
+        // Fallback for API < 30 or if getCurrentLocation fails
+        activeLocationListener = new LocationListener() {
+            @Override
+            public void onLocationChanged(Location location) {
+                if (location != null) {
+                    pushLocationToWeb(location);
+                    stopLocationUpdates();
+                }
+            }
+            @Override public void onStatusChanged(String provider, int status, Bundle extras) {}
+            @Override public void onProviderEnabled(String provider) {}
+            @Override public void onProviderDisabled(String provider) {}
+        };
+
+        boolean requested = false;
+        try {
+            if (locationManager.isProviderEnabled(LocationManager.NETWORK_PROVIDER)) {
+                locationManager.requestLocationUpdates(
+                        LocationManager.NETWORK_PROVIDER, 1000L, 1.0f, activeLocationListener, Looper.getMainLooper());
+                requested = true;
+            }
+        } catch (Throwable ignored) {}
+
+        try {
+            if (locationManager.isProviderEnabled(LocationManager.GPS_PROVIDER)) {
+                locationManager.requestLocationUpdates(
+                        LocationManager.GPS_PROVIDER, 1000L, 1.0f, activeLocationListener, Looper.getMainLooper());
+                requested = true;
+            }
+        } catch (Throwable ignored) {}
+
+        if (requested) {
+            handler.postDelayed(this::stopLocationUpdates, 20000L);
+        }
+    }
+
+    private void stopLocationUpdates() {
+        if (activeLocationListener != null && locationManager != null) {
+            try {
+                locationManager.removeUpdates(activeLocationListener);
+            } catch (Throwable ignored) {}
+            activeLocationListener = null;
+        }
+    }
+
+    private void pushLocationToWeb(Location loc) {
+        if (loc == null || webView == null) return;
+        handler.post(() -> {
+            String script = String.format(Locale.US,
+                    "(function(){" +
+                            "  if (typeof window.onNativeLocationReceived === 'function') {" +
+                            "    window.onNativeLocationReceived(%.7f, %.7f, %.1f);" +
+                            "  } else if (typeof detectCurrentLocation === 'function') {" +
+                            "    detectCurrentLocation({ adopt: true });" +
+                            "  }" +
+                            "})()", loc.getLatitude(), loc.getLongitude(), loc.hasAccuracy() ? loc.getAccuracy() : 25.0f);
+            webView.evaluateJavascript(script, null);
+        });
+    }
+
+    private void injectGeolocationBridge() {
+        if (webView == null) return;
+        String script = "(function(){\n" +
+                "  if (window.__planwise_geo_patched) return;\n" +
+                "  window.__planwise_geo_patched = true;\n" +
+                "  if (!window.AndroidLocationBridge) return;\n" +
+                "  var orig = navigator.geolocation.getCurrentPosition.bind(navigator.geolocation);\n" +
+                "  navigator.geolocation.getCurrentPosition = function(success, error, options) {\n" +
+                "    try {\n" +
+                "      var raw = window.AndroidLocationBridge.getDeviceLocation();\n" +
+                "      if (raw) {\n" +
+                "        var p = JSON.parse(raw);\n" +
+                "        if (p && typeof p.lat === 'number' && typeof p.lon === 'number') {\n" +
+                "          success({\n" +
+                "            coords: {\n" +
+                "              latitude: p.lat,\n" +
+                "              longitude: p.lon,\n" +
+                "              accuracy: p.accuracy || 25,\n" +
+                "              altitude: null,\n" +
+                "              altitudeAccuracy: null,\n" +
+                "              heading: null,\n" +
+                "              speed: null\n" +
+                "            },\n" +
+                "            timestamp: p.time || Date.now()\n" +
+                "          });\n" +
+                "          return;\n" +
+                "        }\n" +
+                "      }\n" +
+                "    } catch(e) { console.warn('Bridge location parse error', e); }\n" +
+                "    window.AndroidLocationBridge.requestDeviceLocation();\n" +
+                "    orig(success, error, options);\n" +
+                "  };\n" +
+                "})();";
+        webView.evaluateJavascript(script, null);
+    }
+
+    public class WebAppInterface {
+        @JavascriptInterface
+        public String getDeviceLocation() {
+            if (!hasLocationPermission()) {
+                handler.post(MainActivity.this::requestLocationPermissionIfNeeded);
+                return null;
+            }
+            Location loc = getBestLastKnownLocation();
+            if (loc != null) {
+                return String.format(Locale.US,
+                        "{\"lat\":%.7f,\"lon\":%.7f,\"accuracy\":%.1f,\"time\":%d}",
+                        loc.getLatitude(), loc.getLongitude(),
+                        loc.hasAccuracy() ? loc.getAccuracy() : 25.0f,
+                        loc.getTime());
+            }
+            handler.post(MainActivity.this::requestFreshLocation);
+            return null;
+        }
+
+        @JavascriptInterface
+        public void requestDeviceLocation() {
+            handler.post(() -> {
+                if (hasLocationPermission()) {
+                    requestFreshLocation();
+                } else {
+                    requestLocationPermissionIfNeeded();
+                }
+            });
+        }
+
+        @JavascriptInterface
+        public boolean hasPermission() {
+            return hasLocationPermission();
+        }
+    }
+
     @Override
     public void onRequestPermissionsResult(int requestCode, String[] permissions, int[] grantResults) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults);
-        if (requestCode != LOCATION_REQUEST || pendingGeoCallback == null) {
+        if (requestCode != LOCATION_REQUEST) {
             return;
         }
         boolean granted = hasLocationPermission();
-        pendingGeoCallback.invoke(pendingGeoOrigin, granted, false);
-        if (!granted) {
+        if (pendingGeoCallback != null) {
+            pendingGeoCallback.invoke(pendingGeoOrigin, granted, true);
+            pendingGeoCallback = null;
+            pendingGeoOrigin = null;
+        }
+        if (granted) {
+            requestFreshLocation();
+            // Automatically invoke detectCurrentLocation in the web page now that permission is active
+            handler.postDelayed(() -> {
+                if (webView != null) {
+                    webView.evaluateJavascript(
+                            "(function(){ if (typeof detectCurrentLocation === 'function') { detectCurrentLocation({ adopt: true }); } })()",
+                            null);
+                }
+            }, 600);
+        } else {
             Toast.makeText(this, R.string.location_denied, Toast.LENGTH_LONG).show();
         }
-        pendingGeoCallback = null;
-        pendingGeoOrigin = null;
     }
 
     // ── Back button ─────────────────────────────────────────────────
@@ -304,12 +578,14 @@ public class MainActivity extends Activity {
 
     @Override
     protected void onPause() {
+        stopLocationUpdates();
         webView.onPause();
         super.onPause();
     }
 
     @Override
     protected void onDestroy() {
+        stopLocationUpdates();
         handler.removeCallbacksAndMessages(null);
         if (webView != null) {
             webView.stopLoading();

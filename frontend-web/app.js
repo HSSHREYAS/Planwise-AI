@@ -373,13 +373,43 @@ function setCapsuleHint(text, isError = false) {
 }
 
 /**
+ * Reverse geocode and apply coordinates.
+ */
+async function applyGpsCoordinates(latitude, longitude, adopt = true, quiet = false) {
+  try {
+    const res = await apiFetch(`/geo/reverse?lat=${latitude.toFixed(5)}&lon=${longitude.toFixed(5)}`, {}, 20000);
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const place = await res.json();
+    gpsLocation = { name: place.name, label: place.label, lat: place.lat, lon: place.lon, source: 'gps' };
+    if (adopt) setActiveLocation(gpsLocation);
+    if (!quiet) setCapsuleHint(`Using your current location: ${place.label}`);
+    return gpsLocation;
+  } catch (err) {
+    console.warn('Reverse geocoding failed:', err);
+    if (!quiet) setCapsuleHint('Found your position but could not name it — is the backend running?', true);
+    return null;
+  }
+}
+
+// Global hook for native Android wrapper to push coordinates immediately
+window.onNativeLocationReceived = async function(latitude, longitude, accuracy) {
+  console.log('Received native location:', latitude, longitude, accuracy);
+  const loc = await applyGpsCoordinates(latitude, longitude, true, true);
+  btnLocate.classList.remove('is-busy');
+  if (btnChipLocate) {
+    btnChipLocate.disabled = false;
+    btnChipLocate.textContent = loc ? '📍 Use my current location' : '⚠️ Location unavailable — type a city';
+  }
+};
+
+/**
  * Resolve the device position to a named place.
  * @param {boolean} adopt  make it the active location when found
  * @param {boolean} quiet  no error hints (used for the automatic attempt on load)
  */
 function detectCurrentLocation({ adopt = true, quiet = false } = {}) {
-  return new Promise(resolve => {
-    if (!('geolocation' in navigator)) {
+  return new Promise(async resolve => {
+    if (!('geolocation' in navigator) && !window.AndroidLocationBridge) {
       if (!quiet) setCapsuleHint('Location is not available in this browser — type a city instead.', true);
       resolve(null);
       return;
@@ -387,36 +417,73 @@ function detectCurrentLocation({ adopt = true, quiet = false } = {}) {
     if (!quiet) setCapsuleHint('Finding your location…');
     btnLocate.classList.add('is-busy');
 
-    navigator.geolocation.getCurrentPosition(async position => {
-      const { latitude, longitude } = position.coords;
+    // 1. Check Native Android Bridge first if available
+    if (window.AndroidLocationBridge) {
       try {
-        const res = await apiFetch(`/geo/reverse?lat=${latitude.toFixed(5)}&lon=${longitude.toFixed(5)}`, {}, 20000);
-        if (!res.ok) throw new Error(`HTTP ${res.status}`);
-        const place = await res.json();
-        gpsLocation = { name: place.name, label: place.label, lat: place.lat, lon: place.lon, source: 'gps' };
-        if (adopt) setActiveLocation(gpsLocation);
-        if (!quiet) setCapsuleHint(`Using your current location: ${place.label}`);
-        resolve(gpsLocation);
+        const raw = window.AndroidLocationBridge.getDeviceLocation();
+        if (raw) {
+          const parsed = JSON.parse(raw);
+          if (parsed && typeof parsed.lat === 'number' && typeof parsed.lon === 'number') {
+            const loc = await applyGpsCoordinates(parsed.lat, parsed.lon, adopt, quiet);
+            btnLocate.classList.remove('is-busy');
+            resolve(loc);
+            return;
+          }
+        }
+        window.AndroidLocationBridge.requestDeviceLocation();
       } catch (err) {
-        console.warn('Reverse geocoding failed:', err);
-        if (!quiet) setCapsuleHint('Found your position but could not name it — is the backend running?', true);
-        resolve(null);
-      } finally {
+        console.warn('Native location bridge error:', err);
+      }
+    }
+
+    // 2. Query HTML5 Geolocation with automatic low -> high accuracy fallback
+    const queryPosition = (highAccuracy, timeoutMs) => {
+      return new Promise((res, rej) => {
+        navigator.geolocation.getCurrentPosition(res, rej, {
+          enableHighAccuracy: highAccuracy,
+          timeout: timeoutMs,
+          maximumAge: highAccuracy ? 60000 : 300000,
+        });
+      });
+    };
+
+    let position = null;
+    try {
+      position = await queryPosition(false, 8000);
+    } catch (firstErr) {
+      if (firstErr && (firstErr.code === firstErr.TIMEOUT || firstErr.code === firstErr.POSITION_UNAVAILABLE)) {
+        try {
+          position = await queryPosition(true, 18000);
+        } catch (secondErr) {
+          firstErr = secondErr;
+        }
+      }
+      if (!position) {
         btnLocate.classList.remove('is-busy');
+        if (!quiet) {
+          const denied = firstErr && firstErr.code === firstErr.PERMISSION_DENIED;
+          setCapsuleHint(
+            denied
+              ? 'Location permission was denied — type a city, or allow location access in your device settings.'
+              : 'Could not get your location — type a city instead.',
+            true,
+          );
+        }
+        if (firstErr && firstErr.code === firstErr.PERMISSION_DENIED && window.AndroidLocationBridge) {
+          try { window.AndroidLocationBridge.requestDeviceLocation(); } catch (_) {}
+        }
+        resolve(null);
+        return;
       }
-    }, error => {
+    }
+
+    try {
+      const { latitude, longitude } = position.coords;
+      const loc = await applyGpsCoordinates(latitude, longitude, adopt, quiet);
+      resolve(loc);
+    } finally {
       btnLocate.classList.remove('is-busy');
-      if (!quiet) {
-        const denied = error.code === error.PERMISSION_DENIED;
-        setCapsuleHint(
-          denied
-            ? 'Location permission was denied — type a city, or allow location access in your browser.'
-            : 'Could not get your location — type a city instead.',
-          true,
-        );
-      }
-      resolve(null);
-    }, { enableHighAccuracy: false, timeout: 12000, maximumAge: 600000 });
+    }
   });
 }
 
