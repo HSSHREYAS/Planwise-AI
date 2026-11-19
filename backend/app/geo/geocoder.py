@@ -63,7 +63,7 @@ _last_request_at = 0.0
 _last_request_ok = True
 
 
-def _request(path: str, params: Dict[str, Any]) -> Any:
+def _request(path: str, params: Dict[str, Any], timeout: Optional[int] = None) -> Any:
     """Throttled GET against Nominatim."""
     global _last_request_at, _last_request_ok
     with _lock:
@@ -75,7 +75,7 @@ def _request(path: str, params: Dict[str, Any]) -> Any:
                 f"{config.NOMINATIM_URL}{path}",
                 params={**params, "format": "jsonv2", "addressdetails": 1, "accept-language": "en"},
                 headers={"User-Agent": config.GEO_USER_AGENT},
-                timeout=config.GEO_TIMEOUT,
+                timeout=timeout if timeout is not None else config.GEO_TIMEOUT,
             )
             resp.raise_for_status()
             data = resp.json()
@@ -216,32 +216,84 @@ def reverse(lat: float, lon: float) -> Optional[Place]:
     if key in _cache:
         return _cache[key]
 
+    # Keep reverse lookup below the browser timeout. Slow Nominatim responses
+    # then leave enough time to try the fallback provider.
+    timeout = max(1, min(config.GEO_TIMEOUT, 8))
     try:
-        item = _request("/reverse", {"lat": lat, "lon": lon, "zoom": 12})
+        item = _request("/reverse", {"lat": lat, "lon": lon, "zoom": 12}, timeout=timeout)
     except Exception as e:
         logger.warning(f"Reverse geocoding failed for {lat},{lon}: {e}")
-        return None
-    if not isinstance(item, dict) or "lat" not in item:
-        return None
+        item = None
 
-    address = item.get("address") or {}
-    locality = (
-        address.get("city") or address.get("town") or address.get("village")
-        or address.get("municipality") or address.get("suburb")
-        or address.get("county") or item.get("name")
-    )
-    place = _to_place(item)
-    # Keep the user's exact position as the centre, name it after the locality
-    place = place.model_copy(update={
-        "name": str(locality or place.name).strip(),
-        "lat": float(lat),
-        "lon": float(lon),
-        "kind": "current_location",
-        "radius_m": 5000,
-    })
-    _cache[key] = place
-    remember(place)
+    if isinstance(item, dict) and "lat" in item:
+        try:
+            address = item.get("address") or {}
+            locality = (
+                address.get("city") or address.get("town") or address.get("village")
+                or address.get("municipality") or address.get("suburb")
+                or address.get("county") or item.get("name")
+            )
+            place = _to_place(item)
+            # Keep the user's exact position as the centre, named after the locality.
+            place = place.model_copy(update={
+                "name": str(locality or place.name).strip(),
+                "lat": float(lat),
+                "lon": float(lon),
+                "kind": "current_location",
+                "radius_m": 5000,
+            })
+            _cache[key] = place
+            remember(place)
+            return place
+        except (KeyError, TypeError, ValueError) as e:
+            logger.warning(f"Could not parse Nominatim reverse result for {lat},{lon}: {e}")
+
+    place = _photon_reverse(lat, lon, timeout)
+    if place is not None:
+        _cache[key] = place
+        remember(place)
     return place
+
+
+def _photon_reverse(lat: float, lon: float, timeout: int) -> Optional[Place]:
+    """Try Photon when Nominatim is unavailable or has no matching result."""
+    try:
+        response = requests.get(
+            "https://photon.komoot.io/reverse",
+            params={"lat": lat, "lon": lon, "lang": "en", "limit": 1},
+            headers={"User-Agent": config.GEO_USER_AGENT},
+            timeout=timeout,
+        )
+        response.raise_for_status()
+        features = (response.json() or {}).get("features") or []
+        if not features or not isinstance(features[0], dict):
+            return None
+        properties = features[0].get("properties") or {}
+        locality = (
+            properties.get("city") or properties.get("town") or properties.get("village")
+            or properties.get("municipality") or properties.get("suburb")
+            or properties.get("district") or properties.get("county")
+            or properties.get("state") or properties.get("name") or properties.get("country")
+        )
+        if not locality:
+            return None
+        country = str(properties.get("country") or "")
+        state = str(properties.get("state") or "")
+        name = str(locality).strip()
+        return Place(
+            name=name,
+            display_name=", ".join(part for part in (name, state, country) if part),
+            lat=float(lat),
+            lon=float(lon),
+            country=country,
+            country_code=str(properties.get("countrycode") or "").lower(),
+            state=state,
+            kind="current_location",
+            radius_m=5000,
+        )
+    except Exception as e:
+        logger.warning(f"Photon reverse geocoding failed for {lat},{lon}: {e}")
+        return None
 
 
 def service_ok() -> bool:

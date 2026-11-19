@@ -942,7 +942,7 @@ async function applyGpsCoordinates(latitude, longitude, adopt = true, quiet = fa
     source: 'gps',
   };
   try {
-    const res = await apiFetch(`/geo/reverse?lat=${latitude.toFixed(5)}&lon=${longitude.toFixed(5)}`, {}, 20000);
+    const res = await apiFetch(`/geo/reverse?lat=${latitude.toFixed(5)}&lon=${longitude.toFixed(5)}`, {}, 35000);
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const place = await res.json();
     gpsLocation = { name: place.name, label: place.label, lat: place.lat, lon: place.lon, source: 'gps' };
