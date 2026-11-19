@@ -498,39 +498,69 @@
     </div>
   </main>
 
-  <dialog class="profile-dialog" id="profile-dialog" aria-labelledby="profile-title">
-    <form id="profile-form" method="dialog">
-      <div class="profile-dialog-heading">
-        <div>
-          <span class="section-tag">Private to your account</span>
-          <h2 id="profile-title">Your profile</h2>
-          <p>Set up the details and travel preferences PlanWise can remember.</p>
+  <main class="profile-page" id="view-profile" hidden>
+    <div class="container profile-page-container">
+      <button type="button" class="profile-back-button" id="btn-profile-back">← Back</button>
+      <section class="profile-hero-card" aria-labelledby="profile-heading-name">
+        <div class="profile-page-avatar" id="profile-page-avatar" aria-hidden="true">👤</div>
+        <div class="profile-hero-copy">
+          <span class="profile-private-label">🔒 PRIVATE PROFILE</span>
+          <h1 id="profile-heading-name">Your profile</h1>
+          <p id="profile-heading-email"></p>
         </div>
-        <button type="button" class="dialog-close" id="btn-profile-close" aria-label="Close profile">×</button>
-      </div>
-      <div class="profile-account-email">
-        <span>Signed in with</span>
-        <strong id="profile-email"></strong>
-        <button type="button" class="auth-text-button profile-reset-button" id="btn-profile-reset">Send password reset email</button>
-      </div>
-      <div class="profile-form-grid">
-        <label class="profile-field">Display name<input id="profile-display-name" maxlength="80" autocomplete="name" /></label>
-        <label class="profile-field">Hometown<input id="profile-hometown" maxlength="100" autocomplete="address-level2" placeholder="City or region" /></label>
-        <label class="profile-field profile-field-wide">About you<textarea id="profile-bio" maxlength="500" rows="3" placeholder="A short introduction (optional)"></textarea></label>
-        <label class="profile-field profile-field-wide">Languages<input id="profile-languages" maxlength="240" placeholder="English, Hindi" /></label>
-        <label class="profile-field profile-field-wide">Interests<input id="profile-interests" maxlength="400" placeholder="Food, museums, hiking" /></label>
-        <label class="profile-field">Usual group size<select id="profile-travelers"></select></label>
-        <label class="profile-field">Currency<input id="profile-currency" maxlength="3" pattern="[A-Za-z]{3}" placeholder="INR" /></label>
-        <label class="profile-field profile-field-wide">Travel style<input id="profile-trip-style" maxlength="80" placeholder="Relaxed, outdoors, culture, family-friendly…" /></label>
-      </div>
-      <p class="profile-save-message" id="profile-save-message" role="status" aria-live="polite"></p>
-      <div class="profile-dialog-actions">
         <button type="button" class="auth-sign-out profile-sign-out" id="btn-profile-sign-out">Sign out</button>
-        <button type="button" class="btn-secondary" id="btn-profile-cancel">Cancel</button>
-        <button type="submit" class="btn-primary" id="btn-profile-save">Save profile</button>
+      </section>
+
+      <div class="profile-page-layout">
+        <aside class="profile-page-sidebar" aria-label="Profile sections">
+          <a href="#profile-personal">About you</a>
+          <a href="#profile-travel">Travel preferences</a>
+          <a href="#profile-security">Login &amp; security</a>
+          <p>Your personal details are visible only to you.</p>
+        </aside>
+
+        <form class="profile-page-form" id="profile-form">
+          <section class="profile-section" id="profile-personal">
+            <span class="section-tag">Personal profile</span>
+            <h2>About you</h2>
+            <p>Add a few details to personalize your planning space.</p>
+            <div class="profile-form-grid">
+              <label class="profile-field">Display name<input id="profile-display-name" maxlength="80" autocomplete="name" /></label>
+              <label class="profile-field">Hometown<input id="profile-hometown" maxlength="100" autocomplete="address-level2" placeholder="City or region" /></label>
+              <label class="profile-field profile-field-wide">About you<textarea id="profile-bio" maxlength="500" rows="4" placeholder="A short introduction (optional)"></textarea></label>
+              <label class="profile-field">Languages<input id="profile-languages" maxlength="240" placeholder="English, Hindi" /></label>
+              <label class="profile-field">Interests<input id="profile-interests" maxlength="400" placeholder="Food, museums, hiking" /></label>
+            </div>
+          </section>
+
+          <section class="profile-section" id="profile-travel">
+            <span class="section-tag">Make planning easier</span>
+            <h2>Travel preferences</h2>
+            <p>These defaults help PlanWise start with the right group size and style.</p>
+            <div class="profile-form-grid">
+              <label class="profile-field">Usual group size<select id="profile-travelers"></select></label>
+              <label class="profile-field">Preferred currency<input id="profile-currency" maxlength="3" pattern="[A-Za-z]{3}" placeholder="INR" /></label>
+              <label class="profile-field profile-field-wide">Travel style<input id="profile-trip-style" maxlength="80" placeholder="Relaxed, outdoors, culture, family-friendly…" /></label>
+            </div>
+          </section>
+
+          <section class="profile-section" id="profile-security">
+            <span class="section-tag">Account</span>
+            <h2>Login &amp; security</h2>
+            <div class="profile-security-row">
+              <div><span>Email address</span><strong id="profile-email"></strong></div>
+              <button type="button" class="btn-secondary" id="btn-profile-reset">Send password reset email</button>
+            </div>
+          </section>
+
+          <div class="profile-form-footer">
+            <p class="profile-save-message" id="profile-save-message" role="status" aria-live="polite"></p>
+            <button type="submit" class="btn-primary" id="btn-profile-save">Save profile</button>
+          </div>
+        </form>
       </div>
-    </form>
-  </dialog>
+    </div>
+  </main>
 
   <!-- =====================================================================
        FOOTER

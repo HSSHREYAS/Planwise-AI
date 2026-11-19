@@ -28,6 +28,8 @@ let experienceInitializedForUid = null;
 let profileData = null;
 let profileLoadedForUid = null;
 let savedSessions = [];
+let activeView = 'landing';
+let profileReturnView = 'landing';
 
 /**
  * The location every request is planned for.
@@ -72,7 +74,6 @@ const authAccount = $('auth-account');
 const authAccountLabel = $('auth-account-label');
 const authSignOut = $('auth-sign-out');
 const themeToggle = $('theme-toggle');
-const profileDialog = $('profile-dialog');
 
 const chatMessages = $('chat-messages');
 const chatInput = $('chat-input');
@@ -360,6 +361,7 @@ function applyAuthState(user) {
       savedSessions = [];
       chatMessages.innerHTML = welcomeMessageHtml();
       $('saved-plans-section').hidden = true;
+      if (activeView === 'profile') switchView('landing');
     }
     authGate.hidden = false;
     authAccount.hidden = true;
@@ -503,19 +505,25 @@ function applyTheme(theme) {
 
 
 /* =====================================================================
-   2. VIEW MANAGEMENT (Landing vs Planner)
+   2. VIEW MANAGEMENT (Explore, Planner, History, Profile)
    ===================================================================== */
 function switchView(viewName) {
   const planner = viewName === 'planner';
   const history = viewName === 'history';
-  viewLanding.style.display = planner || history ? 'none' : 'block';
+  const profile = viewName === 'profile';
+  if (profile && activeView !== 'profile') profileReturnView = activeView;
+  activeView = viewName;
+  viewLanding.style.display = planner || history || profile ? 'none' : 'block';
   viewPlanner.style.display = planner ? 'block' : 'none';
   $('view-history').hidden = !history;
-  $('saved-plans-section').hidden = planner || history || savedSessions.length === 0;
-  navExplore.classList.toggle('active', !planner && !history);
+  $('view-profile').hidden = !profile;
+  $('saved-plans-section').hidden = planner || history || profile || savedSessions.length === 0;
+  navExplore.classList.toggle('active', !planner && !history && !profile);
   navPlanner.classList.toggle('active', planner);
   $('nav-history').classList.toggle('active', history);
+  $('btn-profile').classList.toggle('is-active', profile);
   document.body.classList.toggle('in-planner', planner);
+  document.body.classList.toggle('in-profile', profile);
   window.scrollTo({ top: 0, behavior: 'smooth' });
   if (planner) {
     // on phones the keyboard would cover half the screen: don't pop it up uninvited
@@ -577,8 +585,7 @@ function setupNavigation() {
   $('btn-planner-history').addEventListener('click', showHistory);
 
   $('btn-profile').addEventListener('click', openProfile);
-  $('btn-profile-close').addEventListener('click', () => profileDialog.close());
-  $('btn-profile-cancel').addEventListener('click', () => profileDialog.close());
+  $('btn-profile-back').addEventListener('click', () => switchView(profileReturnView));
   $('btn-profile-sign-out').addEventListener('click', () => authSignOut.click());
   $('btn-profile-reset').addEventListener('click', sendProfilePasswordReset);
   $('profile-form').addEventListener('submit', saveProfile);
@@ -721,7 +728,9 @@ async function openSavedSession(sessionId) {
 function renderProfileAvatar() {
   const name = profileData?.display_name || authenticatedUser?.displayName || authenticatedUser?.email || '';
   const initials = name.trim().split(/[\s@._-]+/).filter(Boolean).slice(0, 2).map(part => part[0]).join('').toUpperCase();
-  $('btn-profile').textContent = initials || '👤';
+  const avatarText = initials || '👤';
+  $('btn-profile').textContent = avatarText;
+  $('profile-page-avatar').textContent = avatarText;
 }
 
 function setupProfileFormControls() {
@@ -744,6 +753,8 @@ function fillProfileForm(profile) {
   $('profile-currency').value = profile.preferred_currency || 'USD';
   $('profile-trip-style').value = profile.preferred_trip_style || '';
   $('profile-email').textContent = profile.email || authenticatedUser?.email || '';
+  $('profile-heading-email').textContent = profile.email || authenticatedUser?.email || '';
+  $('profile-heading-name').textContent = profile.display_name || authenticatedUser?.displayName || 'Your profile';
 }
 
 async function loadProfile() {
@@ -762,7 +773,11 @@ async function loadProfile() {
     }
     authAccountLabel.textContent = data.display_name || authenticatedUser.email || 'Account';
     renderProfileAvatar();
-    if (profileDialog.open) fillProfileForm(profileData);
+    if (activeView === 'profile') {
+      fillProfileForm(profileData);
+      $('profile-save-message').textContent = '';
+      $('profile-save-message').classList.remove('is-error');
+    }
     return data;
   } catch (error) {
     $('profile-save-message').textContent = error.message || 'Could not load your profile.';
@@ -775,10 +790,12 @@ async function openProfile() {
   if (!authenticatedUser) return;
   $('profile-save-message').textContent = '';
   $('profile-save-message').classList.remove('is-error');
-  if (profileLoadedForUid !== authenticatedUser.uid) await loadProfile();
   fillProfileForm(profileData || { email: authenticatedUser.email });
-  if (typeof profileDialog.showModal === 'function') profileDialog.showModal();
-  else profileDialog.setAttribute('open', '');
+  switchView('profile');
+  if (profileLoadedForUid !== authenticatedUser.uid) {
+    $('profile-save-message').textContent = 'Loading your profile…';
+    await loadProfile();
+  }
 }
 
 async function saveProfile(event) {
