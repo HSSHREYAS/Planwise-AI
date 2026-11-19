@@ -106,12 +106,10 @@ def get_profile(uid: str) -> Dict[str, Any]:
 
 def save_profile(uid: str, values: Dict[str, Any]) -> Dict[str, Any]:
     ref = _user_ref(uid).collection("private").document("profile")
-    snapshot = ref.get()
-    current = snapshot.to_dict() if snapshot.exists else {}
     profile = {
         **values,
-        "created_at": current.get("created_at") or datetime.now(timezone.utc),
         "updated_at": datetime.now(timezone.utc),
     }
-    ref.set(profile)
+    # A merge preserves any existing creation metadata without an extra read.
+    ref.set(profile, merge=True, timeout=25)
     return profile

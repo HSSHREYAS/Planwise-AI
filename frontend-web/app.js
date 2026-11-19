@@ -12,6 +12,7 @@ const API_BASE = window.location.protocol === 'file:'
   : '/api/v1';
 
 const REQUEST_TIMEOUT_MS = 180000;
+const PROFILE_REQUEST_TIMEOUT_MS = 60000;
 const MAX_TRIP_DAYS = 14;
 const LOCATION_STORAGE_KEY = 'planwise_location';
 
@@ -220,7 +221,9 @@ async function apiFetch(path, options = {}, timeoutMs = REQUEST_TIMEOUT_MS) {
     headers.set('Authorization', `Bearer ${await authenticatedUser.getIdToken()}`);
   }
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  const timer = setTimeout(() => {
+    controller.abort(new DOMException(`Request timed out after ${Math.ceil(timeoutMs / 1000)} seconds.`, 'TimeoutError'));
+  }, timeoutMs);
   const external = options.signal;
   const forwardAbort = () => controller.abort();
   if (external) {
@@ -229,6 +232,11 @@ async function apiFetch(path, options = {}, timeoutMs = REQUEST_TIMEOUT_MS) {
   }
   try {
     return await fetch(`${API_BASE}${path}`, { ...options, headers, signal: controller.signal });
+  } catch (error) {
+    if (controller.signal.aborted && !external?.aborted) {
+      throw new Error(`Request timed out after ${Math.ceil(timeoutMs / 1000)} seconds. Please try again.`);
+    }
+    throw error;
   } finally {
     clearTimeout(timer);
     if (external) external.removeEventListener('abort', forwardAbort);
@@ -611,6 +619,14 @@ function apiErrorText(data, fallback) {
   return typeof data?.detail === 'string' ? data.detail : fallback;
 }
 
+function friendlyRequestError(error, fallback) {
+  const message = error?.message || '';
+  if (error?.name === 'AbortError' || error?.name === 'TimeoutError' || /signal .*aborted/i.test(message)) {
+    return 'The profile request took too long or was interrupted. Check your connection and try again.';
+  }
+  return message || fallback;
+}
+
 function formatHistoryDate(value) {
   if (!value) return 'Saved plan';
   const date = new Date(value);
@@ -761,7 +777,7 @@ async function loadProfile() {
   if (!authenticatedUser) return null;
   const ownerUid = authenticatedUser.uid;
   try {
-    const res = await apiFetch('/profile', {}, 20000);
+    const res = await apiFetch('/profile', {}, PROFILE_REQUEST_TIMEOUT_MS);
     const data = await res.json().catch(() => ({}));
     if (!res.ok) throw new Error(apiErrorText(data, 'Could not load your profile.'));
     if (authenticatedUser?.uid !== ownerUid) return null;
@@ -780,7 +796,7 @@ async function loadProfile() {
     }
     return data;
   } catch (error) {
-    $('profile-save-message').textContent = error.message || 'Could not load your profile.';
+    $('profile-save-message').textContent = friendlyRequestError(error, 'Could not load your profile.');
     $('profile-save-message').classList.add('is-error');
     return null;
   }
@@ -822,17 +838,21 @@ async function saveProfile(event) {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload),
-    }, 20000);
+    }, PROFILE_REQUEST_TIMEOUT_MS);
     const data = await res.json().catch(() => ({}));
     if (!res.ok) throw new Error(apiErrorText(data, 'Could not save your profile.'));
     profileData = data;
     profileLoadedForUid = authenticatedUser.uid;
+    const preferredTravelers = Number(data.default_travelers);
+    if (Number.isInteger(preferredTravelers) && preferredTravelers >= 1 && preferredTravelers <= MAX_TRAVELLERS) {
+      setTravellers(preferredTravelers);
+    }
     authAccountLabel.textContent = data.display_name || authenticatedUser.email || 'Account';
     renderProfileAvatar();
     fillProfileForm(data);
     message.textContent = 'Profile saved.';
   } catch (error) {
-    message.textContent = error.message || 'Could not save your profile.';
+    message.textContent = friendlyRequestError(error, 'Could not save your profile.');
     message.classList.add('is-error');
   } finally {
     saveButton.disabled = false;
