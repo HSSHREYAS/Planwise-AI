@@ -7,7 +7,7 @@ Based on API Specific Document Sections 7-17, 22.
 
 from typing import Any, Dict, List, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, constr
 
 from app.models.schemas import (
     AgentResponse,
@@ -34,6 +34,18 @@ class SessionResponse(BaseModel):
     session_id: str
     status: str
     state: Dict[str, Any]
+
+
+class ProfileUpdate(BaseModel):
+    """Private account and trip defaults editable by the signed-in user."""
+    display_name: str = Field(default="", max_length=80)
+    hometown: str = Field(default="", max_length=100)
+    bio: str = Field(default="", max_length=500)
+    languages: List[constr(strip_whitespace=True, max_length=40)] = Field(default_factory=list, max_length=12)
+    interests: List[constr(strip_whitespace=True, max_length=40)] = Field(default_factory=list, max_length=20)
+    default_travelers: int = Field(default=1, ge=1, le=20)
+    preferred_currency: str = Field(default="USD", pattern=r"^[A-Za-z]{3}$")
+    preferred_trip_style: str = Field(default="", max_length=80)
 
 
 # ── Messages ────────────────────────────────────────────────────

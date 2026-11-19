@@ -24,11 +24,13 @@ from app.models.requests import (
     MessageRequest,
     PlaceResponse,
     PlanResponse,
+    ProfileUpdate,
     ReplanRequest,
     SessionCreateRequest,
     SessionCreateResponse,
     SessionResponse,
 )
+from app.services import firestore_store
 from app.services.session_service import session_service
 from app.validation.constraints import validate_plan
 
@@ -37,10 +39,56 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/v1")
 
 
+def _storage_unavailable(exc: Exception) -> HTTPException:
+    logger.exception("Firebase user data could not be read or saved (%s)", type(exc).__name__)
+    return HTTPException(
+        status_code=503,
+        detail="PlanWise account storage is unavailable. Enable Cloud Firestore for this Firebase project and try again.",
+    )
+
+
 @router.get("/auth/config")
 def auth_config():
     """Return browser-safe Firebase settings and whether sign-in is configured."""
     return public_firebase_config()
+
+
+@router.get("/profile")
+def get_profile(user: dict = Depends(get_current_user)):
+    """Get the signed-in user's private profile and trip preferences."""
+    try:
+        stored = firestore_store.get_profile(user["uid"])
+    except Exception as exc:
+        raise _storage_unavailable(exc) from exc
+    return {
+        "display_name": stored.get("display_name") or user.get("name") or "",
+        "email": user.get("email") or "",
+        "hometown": stored.get("hometown", ""),
+        "bio": stored.get("bio", ""),
+        "languages": stored.get("languages", []),
+        "interests": stored.get("interests", []),
+        "default_travelers": stored.get("default_travelers", 1),
+        "preferred_currency": stored.get("preferred_currency", "USD"),
+        "preferred_trip_style": stored.get("preferred_trip_style", ""),
+    }
+
+
+@router.put("/profile")
+def update_profile(request: ProfileUpdate, user: dict = Depends(get_current_user)):
+    """Save private profile details and default travel preferences."""
+    values = request.model_dump()
+    values["display_name"] = values["display_name"].strip()
+    values["hometown"] = values["hometown"].strip()
+    values["bio"] = values["bio"].strip()
+    values["preferred_trip_style"] = values["preferred_trip_style"].strip()
+    values["languages"] = [value for value in (item.strip() for item in values["languages"]) if value]
+    values["interests"] = [value for value in (item.strip() for item in values["interests"]) if value]
+    values["preferred_currency"] = values["preferred_currency"].upper()
+    try:
+        stored = firestore_store.save_profile(user["uid"], values)
+    except Exception as exc:
+        raise _storage_unavailable(exc) from exc
+    return {**values, "email": user.get("email") or "", "updated_at": stored["updated_at"]}
 
 
 # ── Health ──────────────────────────────────────────────────────
@@ -133,9 +181,26 @@ def geo_prefetch(
 # ── Sessions ────────────────────────────────────────────────────
 
 def _require_owned_session(session_id: str, user: dict) -> None:
-    if not session_service.session_belongs_to(session_id, user["uid"]):
+    uid = user["uid"]
+    if session_service.session_belongs_to(session_id, uid):
+        return
+    try:
+        state = firestore_store.load_session(uid, session_id)
+    except Exception as exc:
+        raise _storage_unavailable(exc) from exc
+    if state is None or not session_service.restore_session(state, uid):
         # Do not reveal whether another account's session ID exists.
         raise HTTPException(status_code=404, detail="Session not found")
+
+
+def _persist_session(session_id: str, uid: str) -> None:
+    state = session_service.get_session(session_id)
+    if state is None:
+        raise HTTPException(status_code=404, detail="Session not found")
+    try:
+        firestore_store.save_session(uid, state)
+    except Exception as exc:
+        raise _storage_unavailable(exc) from exc
 
 
 @router.post("/sessions", response_model=SessionCreateResponse, status_code=201)
@@ -145,7 +210,21 @@ def create_session(
 ):
     """POST /api/v1/sessions - create a new planning session."""
     session_id = session_service.create_session(owner_uid=user["uid"])
+    try:
+        _persist_session(session_id, user["uid"])
+    except HTTPException:
+        session_service.discard_session(session_id)
+        raise
     return SessionCreateResponse(session_id=session_id, status="active")
+
+
+@router.get("/sessions")
+def list_sessions(user: dict = Depends(get_current_user)):
+    """List the current user's saved conversations and plans."""
+    try:
+        return {"sessions": firestore_store.list_sessions(user["uid"])}
+    except Exception as exc:
+        raise _storage_unavailable(exc) from exc
 
 
 @router.get("/sessions/{session_id}", response_model=SessionResponse)
@@ -171,6 +250,20 @@ def get_session(session_id: str, user: dict = Depends(get_current_user)):
             "interests": state.interests,
             "chosen_options": {k: len(v) for k, v in state.chosen_options.items()},
             "has_plan": state.current_plan is not None,
+            "conversation": [item.model_dump(mode="json") for item in state.conversation_history],
+            "plan": state.current_plan.model_dump(mode="json") if state.current_plan else None,
+            "validation": validate_plan(state.current_plan, state).model_dump(mode="json") if state.current_plan else None,
+            "context": {
+                "location": state.location,
+                "lat": (state.place or {}).get("lat"),
+                "lon": (state.place or {}).get("lon"),
+                "start_date": state.start_date,
+                "end_date": state.end_date,
+                "duration_days": state.duration_days,
+                "budget": state.budget,
+                "travelers": state.travelers,
+                "currency": state.currency,
+            },
         },
     )
 
@@ -198,6 +291,8 @@ def send_message(
     context = request.context.model_dump() if request.context else None
     logger.info(f"Message received for session {session_id}: '{message[:80]}'")
     response = session_service.handle_message(session_id, message, context, request.request_id)
+    if response.status.value != "cancelled":
+        _persist_session(session_id, user["uid"])
     return response.model_dump()
 
 
@@ -254,4 +349,6 @@ def replan(
 
     logger.info(f"Replan request for session {session_id}: {request.changes}")
     response = session_service.replan(session_id, request.changes)
+    if response.status.value != "cancelled":
+        _persist_session(session_id, user["uid"])
     return response.model_dump()

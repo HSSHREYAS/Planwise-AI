@@ -55,6 +55,7 @@
         <ul class="nav-links">
           <li class="nav-item active" id="nav-explore" role="button" tabindex="0">Explore</li>
           <li class="nav-item" id="nav-planner" role="button" tabindex="0">AI Trip Planner</li>
+          <li class="nav-item" id="nav-history" role="button" tabindex="0">My trips</li>
           <li class="nav-item" id="nav-how" role="button" tabindex="0">How It Works</li>
         </ul>
       </nav>
@@ -64,18 +65,10 @@
           <span class="auth-account-label" id="auth-account-label"></span>
           <button class="auth-sign-out" id="auth-sign-out" type="button">Sign out</button>
         </div>
-        <!-- 3-Way Theme Switcher -->
-        <div class="theme-switcher" role="group" aria-label="Theme Selector">
-          <button class="theme-btn active" data-theme-val="light" title="Light mode">
-            <span>☀️</span> Light
-          </button>
-          <button class="theme-btn" data-theme-val="dark" title="Dark mode">
-            <span>🌙</span> Dark
-          </button>
-          <button class="theme-btn" data-theme-val="system" title="Follow system preference">
-            <span>💻</span> Auto
-          </button>
-        </div>
+        <button class="theme-toggle" id="theme-toggle" type="button" aria-label="Switch to dark mode" title="Switch to dark mode">
+          <span id="theme-icon" aria-hidden="true">🌙</span><span class="theme-toggle-label">Dark</span>
+        </button>
+        <button class="profile-avatar" id="btn-profile" type="button" aria-label="Open your profile" title="Profile">👤</button>
 
         <button class="btn-primary" id="btn-launch-planner">
           <span>✨ Plan Your Trip</span>
@@ -129,7 +122,7 @@
             <select id="search-travellers" class="travellers-select" aria-label="Number of travellers"></select>
           </div>
 
-          <div class="search-field">
+          <div class="search-field search-field-experience">
             <label for="search-experience">What to Plan</label>
             <select id="search-experience">
               <option value="itinerary">🗺️ Full Itinerary</option>
@@ -151,10 +144,24 @@
           </div>
 
           <button class="search-btn" id="btn-capsule-search" title="Search with AI" aria-label="Search with AI">
-            🔍
+            🔍 <span>Search</span>
           </button>
         </div>
         <div class="capsule-hint" id="capsule-hint" role="status" aria-live="polite"></div>
+      </div>
+    </section>
+
+    <section class="section saved-plans-section" id="saved-plans-section" hidden>
+      <div class="container">
+        <div class="section-header saved-plans-heading">
+          <div>
+            <span class="section-tag">Your planning space</span>
+            <h2 class="section-title">Pick up where you left off</h2>
+            <p class="section-desc">Your saved trip plans and conversations are available whenever you sign in.</p>
+          </div>
+          <button type="button" class="btn-secondary" id="btn-view-all-history">View all</button>
+        </div>
+        <div class="history-grid" id="home-history-list"></div>
       </div>
     </section>
 
@@ -348,29 +355,34 @@
             <span class="llm-badge" id="llm-badge"></span>
           </div>
           <div class="chat-header-actions">
-            <div class="location-chip-wrap">
-              <button class="location-chip" id="location-chip" aria-haspopup="dialog" aria-expanded="false" title="Change location">
-                <span>📍</span>
-                <span id="location-chip-label">Set location</span>
-                <span class="chip-caret">▾</span>
-              </button>
-              <div class="location-popover" id="location-popover" role="dialog" aria-label="Choose location">
-                <label for="chip-where">Plan for</label>
-                <input type="text" id="chip-where" placeholder="Search a city or place" autocomplete="off" />
-                <div class="place-dropdown place-dropdown-inline" id="chip-where-results" role="listbox"></div>
-                <button type="button" class="btn-secondary popover-locate" id="btn-chip-locate">📍 Use my current location</button>
+            <div class="planner-location-controls">
+              <div class="location-chip-wrap">
+                <button class="location-chip" id="location-chip" aria-haspopup="dialog" aria-expanded="false" title="Change location">
+                  <span>📍</span>
+                  <span id="location-chip-label">Set location</span>
+                  <span class="chip-caret">▾</span>
+                </button>
+                <div class="location-popover" id="location-popover" role="dialog" aria-label="Choose location">
+                  <label for="chip-where">Plan for</label>
+                  <input type="text" id="chip-where" placeholder="Search a city or place" autocomplete="off" />
+                  <div class="place-dropdown place-dropdown-inline" id="chip-where-results" role="listbox"></div>
+                  <button type="button" class="btn-secondary popover-locate" id="btn-chip-locate">📍 Use my current location</button>
+                </div>
               </div>
+              <label class="travellers-chip" title="Number of travellers - costs and budget are split between them">
+                <span aria-hidden="true">👥</span>
+                <select id="chip-travellers" class="travellers-select" aria-label="Number of travellers"></select>
+              </label>
             </div>
-            <label class="travellers-chip" title="Number of travellers - costs and budget are split between them">
-              <span aria-hidden="true">👥</span>
-              <select id="chip-travellers" class="travellers-select" aria-label="Number of travellers"></select>
-            </label>
-            <button class="btn-secondary" id="btn-new-chat" title="Start a new chat" aria-label="New chat" style="padding:6px 14px; font-size:0.82rem;">
-              ✨ <span class="btn-label">New Chat</span>
-            </button>
-            <button class="back-to-explore" id="btn-back-explore" title="Back to Explore" aria-label="Back to Explore">
-              ← <span class="btn-label">Explore</span>
-            </button>
+            <div class="planner-session-controls">
+              <button class="btn-secondary" id="btn-new-chat" title="Start a new chat" aria-label="New chat" style="padding:6px 14px; font-size:0.82rem;">
+                ✨ <span class="btn-label">New Chat</span>
+              </button>
+              <button class="btn-secondary planner-history-button" id="btn-planner-history" type="button" title="Open saved conversations">🕘 <span class="btn-label">History</span></button>
+              <button class="back-to-explore" id="btn-back-explore" title="Back to Explore" aria-label="Back to Explore">
+                ← <span class="btn-label">Explore</span>
+              </button>
+            </div>
           </div>
         </div>
 
@@ -468,6 +480,57 @@
       </aside>
     </div>
   </main>
+
+  <main class="history-view" id="view-history" hidden>
+    <div class="container history-page-container">
+      <div class="history-page-heading">
+        <button type="button" class="btn-secondary history-back-button" id="btn-history-back">← Explore</button>
+        <div>
+          <span class="section-tag">Your planning space</span>
+          <h1 class="section-title">Your trips and conversations</h1>
+          <p class="section-desc">Open a saved conversation to see its full chat and continue planning.</p>
+        </div>
+        <button type="button" class="btn-primary" id="btn-history-new-trip">✨ Plan a trip</button>
+      </div>
+      <div class="history-grid" id="full-history-list" aria-live="polite"></div>
+      <p class="history-empty" id="history-empty" hidden>No saved conversations yet. Start planning a trip and it will appear here.</p>
+      <p class="history-error" id="history-error" hidden></p>
+    </div>
+  </main>
+
+  <dialog class="profile-dialog" id="profile-dialog" aria-labelledby="profile-title">
+    <form id="profile-form" method="dialog">
+      <div class="profile-dialog-heading">
+        <div>
+          <span class="section-tag">Private to your account</span>
+          <h2 id="profile-title">Your profile</h2>
+          <p>Set up the details and travel preferences PlanWise can remember.</p>
+        </div>
+        <button type="button" class="dialog-close" id="btn-profile-close" aria-label="Close profile">×</button>
+      </div>
+      <div class="profile-account-email">
+        <span>Signed in with</span>
+        <strong id="profile-email"></strong>
+        <button type="button" class="auth-text-button profile-reset-button" id="btn-profile-reset">Send password reset email</button>
+      </div>
+      <div class="profile-form-grid">
+        <label class="profile-field">Display name<input id="profile-display-name" maxlength="80" autocomplete="name" /></label>
+        <label class="profile-field">Hometown<input id="profile-hometown" maxlength="100" autocomplete="address-level2" placeholder="City or region" /></label>
+        <label class="profile-field profile-field-wide">About you<textarea id="profile-bio" maxlength="500" rows="3" placeholder="A short introduction (optional)"></textarea></label>
+        <label class="profile-field profile-field-wide">Languages<input id="profile-languages" maxlength="240" placeholder="English, Hindi" /></label>
+        <label class="profile-field profile-field-wide">Interests<input id="profile-interests" maxlength="400" placeholder="Food, museums, hiking" /></label>
+        <label class="profile-field">Usual group size<select id="profile-travelers"></select></label>
+        <label class="profile-field">Currency<input id="profile-currency" maxlength="3" pattern="[A-Za-z]{3}" placeholder="INR" /></label>
+        <label class="profile-field profile-field-wide">Travel style<input id="profile-trip-style" maxlength="80" placeholder="Relaxed, outdoors, culture, family-friendly…" /></label>
+      </div>
+      <p class="profile-save-message" id="profile-save-message" role="status" aria-live="polite"></p>
+      <div class="profile-dialog-actions">
+        <button type="button" class="auth-sign-out profile-sign-out" id="btn-profile-sign-out">Sign out</button>
+        <button type="button" class="btn-secondary" id="btn-profile-cancel">Cancel</button>
+        <button type="submit" class="btn-primary" id="btn-profile-save">Save profile</button>
+      </div>
+    </form>
+  </dialog>
 
   <!-- =====================================================================
        FOOTER

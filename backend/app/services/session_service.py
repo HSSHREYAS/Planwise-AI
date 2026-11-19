@@ -2,7 +2,7 @@
 PlanWise AI - Session Service
 
 Manages planning sessions and coordinates between API and agent.
-In-memory session storage (sufficient per project scope).
+In-memory working state with user-owned snapshots persisted to Firestore by the API.
 
 Every request works on a private copy of the session state and only
 commits it back when it finishes. That makes a request cancellable: if the
@@ -71,6 +71,25 @@ class SessionService:
         if state is None:
             logger.warning(f"Session not found: {session_id}")
         return state
+
+    def restore_session(self, state: PlanState, owner_uid: str) -> bool:
+        """Load a persisted, owner-scoped state into this process's memory."""
+        with self._lock:
+            known_owner = self._owners.get(state.session_id)
+            if known_owner and known_owner != owner_uid:
+                return False
+            if state.session_id not in self._sessions:
+                self._sessions[state.session_id] = state
+                self._versions[state.session_id] = 0
+            self._owners[state.session_id] = owner_uid
+        return True
+
+    def discard_session(self, session_id: str) -> None:
+        """Remove a newly-created session if durable storage could not save it."""
+        with self._lock:
+            self._sessions.pop(session_id, None)
+            self._versions.pop(session_id, None)
+            self._owners.pop(session_id, None)
 
     # ── Running requests ────────────────────────────────────────
 

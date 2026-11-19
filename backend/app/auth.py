@@ -79,6 +79,11 @@ def _get_admin_app():
     return _admin_app
 
 
+def get_firebase_admin_app():
+    """Return the initialized Admin app for authenticated Firebase services."""
+    return _get_admin_app()
+
+
 def get_current_user(
     credentials: HTTPAuthorizationCredentials = Depends(_bearer),
 ) -> Dict[str, Any]:

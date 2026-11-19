@@ -25,6 +25,9 @@ let firebaseAuthInitTask = null;
 let authUiBound = false;
 let authMode = 'signin';
 let experienceInitializedForUid = null;
+let profileData = null;
+let profileLoadedForUid = null;
+let savedSessions = [];
 
 /**
  * The location every request is planned for.
@@ -68,6 +71,8 @@ const authSetupNote = $('auth-setup-note');
 const authAccount = $('auth-account');
 const authAccountLabel = $('auth-account-label');
 const authSignOut = $('auth-sign-out');
+const themeToggle = $('theme-toggle');
+const profileDialog = $('profile-dialog');
 
 const chatMessages = $('chat-messages');
 const chatInput = $('chat-input');
@@ -209,7 +214,7 @@ function debounce(fn, wait) {
  */
 async function apiFetch(path, options = {}, timeoutMs = REQUEST_TIMEOUT_MS) {
   const headers = new Headers(options.headers || {});
-  if (/^\/sessions(?:\/|$)/.test(path)) {
+  if (/^\/(?:sessions|profile)(?:\/|$)/.test(path)) {
     if (!authenticatedUser) throw new Error('Sign in to use your planning sessions.');
     headers.set('Authorization', `Bearer ${await authenticatedUser.getIdToken()}`);
   }
@@ -350,7 +355,11 @@ function applyAuthState(user) {
       currentSessionId = null;
       sessionPromise = null;
       experienceInitializedForUid = null;
+      profileLoadedForUid = null;
+      profileData = null;
+      savedSessions = [];
       chatMessages.innerHTML = welcomeMessageHtml();
+      $('saved-plans-section').hidden = true;
     }
     authGate.hidden = false;
     authAccount.hidden = true;
@@ -361,11 +370,15 @@ function applyAuthState(user) {
   if (previousUid && previousUid !== authenticatedUser.uid) {
     currentSessionId = null;
     sessionPromise = null;
+    profileLoadedForUid = null;
+    profileData = null;
+    savedSessions = [];
     chatMessages.innerHTML = welcomeMessageHtml();
   }
   authGate.hidden = true;
   authAccount.hidden = false;
   authAccountLabel.textContent = authenticatedUser.displayName || authenticatedUser.email || 'Account';
+  renderProfileAvatar();
 
   if (experienceInitializedForUid !== authenticatedUser.uid) {
     experienceInitializedForUid = authenticatedUser.uid;
@@ -373,6 +386,8 @@ function applyAuthState(user) {
     initLocation().then(() => {
       if (chatMessages.children.length === 1) chatMessages.innerHTML = welcomeMessageHtml();
     });
+    loadProfile();
+    refreshHistory();
   }
 }
 
@@ -463,24 +478,27 @@ function onActivate(el, handler) {
 
 
 /* =====================================================================
-   1. THEME ENGINE (Light / Dark / System Default)
+   1. THEME ENGINE (Light / Dark)
    ===================================================================== */
 function initTheme() {
   let savedTheme = 'light';
   try { savedTheme = localStorage.getItem('planwise_theme') || 'light'; } catch { /* storage blocked */ }
   applyTheme(savedTheme);
-
-  document.querySelectorAll('.theme-btn').forEach(btn => {
-    btn.addEventListener('click', () => applyTheme(btn.getAttribute('data-theme-val')));
+  themeToggle.addEventListener('click', () => {
+    applyTheme(document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark');
   });
 }
 
 function applyTheme(theme) {
+  theme = theme === 'dark' ? 'dark' : 'light';
   try { localStorage.setItem('planwise_theme', theme); } catch { /* storage blocked */ }
   document.documentElement.setAttribute('data-theme', theme);
-  document.querySelectorAll('.theme-btn').forEach(btn => {
-    btn.classList.toggle('active', btn.getAttribute('data-theme-val') === theme);
-  });
+  const nextTheme = theme === 'dark' ? 'light' : 'dark';
+  const label = `Switch to ${nextTheme} mode`;
+  $('theme-icon').textContent = theme === 'dark' ? '☀️' : '🌙';
+  themeToggle.setAttribute('aria-label', label);
+  themeToggle.title = label;
+  themeToggle.querySelector('.theme-toggle-label').textContent = nextTheme === 'dark' ? 'Dark' : 'Light';
 }
 
 
@@ -489,10 +507,14 @@ function applyTheme(theme) {
    ===================================================================== */
 function switchView(viewName) {
   const planner = viewName === 'planner';
-  viewLanding.style.display = planner ? 'none' : 'block';
+  const history = viewName === 'history';
+  viewLanding.style.display = planner || history ? 'none' : 'block';
   viewPlanner.style.display = planner ? 'block' : 'none';
-  navExplore.classList.toggle('active', !planner);
+  $('view-history').hidden = !history;
+  $('saved-plans-section').hidden = planner || history || savedSessions.length === 0;
+  navExplore.classList.toggle('active', !planner && !history);
   navPlanner.classList.toggle('active', planner);
+  $('nav-history').classList.toggle('active', history);
   document.body.classList.toggle('in-planner', planner);
   window.scrollTo({ top: 0, behavior: 'smooth' });
   if (planner) {
@@ -545,9 +567,21 @@ function flagNewPlan() {
 function setupNavigation() {
   onActivate(navExplore, () => switchView('landing'));
   onActivate(navPlanner, () => switchView('planner'));
+  onActivate($('nav-history'), showHistory);
   onActivate(navBrand, () => switchView('landing'));
   btnLaunchPlanner.addEventListener('click', () => switchView('planner'));
   btnBackExplore.addEventListener('click', () => switchView('landing'));
+  $('btn-view-all-history').addEventListener('click', showHistory);
+  $('btn-history-new-trip').addEventListener('click', () => switchView('planner'));
+  $('btn-history-back').addEventListener('click', () => switchView('landing'));
+  $('btn-planner-history').addEventListener('click', showHistory);
+
+  $('btn-profile').addEventListener('click', openProfile);
+  $('btn-profile-close').addEventListener('click', () => profileDialog.close());
+  $('btn-profile-cancel').addEventListener('click', () => profileDialog.close());
+  $('btn-profile-sign-out').addEventListener('click', () => authSignOut.click());
+  $('btn-profile-reset').addEventListener('click', sendProfilePasswordReset);
+  $('profile-form').addEventListener('submit', saveProfile);
 
   onActivate($('nav-how'), () => {
     switchView('landing');
@@ -560,6 +594,250 @@ function setupNavigation() {
 
   btnNewChat.addEventListener('click', resetChat);
   setupPlannerTabs();
+}
+
+
+/* =====================================================================
+   2A. SAVED CONVERSATIONS & PRIVATE PROFILE
+   ===================================================================== */
+function apiErrorText(data, fallback) {
+  return typeof data?.detail === 'string' ? data.detail : fallback;
+}
+
+function formatHistoryDate(value) {
+  if (!value) return 'Saved plan';
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return 'Saved plan';
+  return date.toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' });
+}
+
+function renderHistoryCard(session) {
+  const card = document.createElement('article');
+  card.className = 'history-card';
+  const open = document.createElement('button');
+  open.type = 'button';
+  open.className = 'history-card-open';
+  open.innerHTML = `
+    <span class="history-card-topline">
+      <span class="history-type">${session.has_plan ? '🗺️ Trip plan' : '💬 Conversation'}</span>
+      <time>${escapeHtml(formatHistoryDate(session.updated_at))}</time>
+    </span>
+    <strong>${escapeHtml(session.title || 'Trip conversation')}</strong>
+    ${session.location ? `<span class="history-location">📍 ${escapeHtml(session.location)}</span>` : ''}
+    <span class="history-last-message">${escapeHtml(session.last_message || 'Open this conversation to continue planning.')}</span>
+    <span class="history-card-cta">Open conversation <span aria-hidden="true">→</span></span>`;
+  open.addEventListener('click', () => openSavedSession(session.session_id));
+  card.appendChild(open);
+  return card;
+}
+
+function paintHistory() {
+  const home = $('home-history-list');
+  const full = $('full-history-list');
+  home.replaceChildren(...savedSessions.slice(0, 3).map(renderHistoryCard));
+  full.replaceChildren(...savedSessions.map(renderHistoryCard));
+  $('saved-plans-section').hidden = savedSessions.length === 0 || !$('view-history').hidden;
+  $('history-empty').hidden = savedSessions.length !== 0;
+  $('history-error').hidden = true;
+}
+
+async function refreshHistory() {
+  if (!authenticatedUser) return;
+  const ownerUid = authenticatedUser.uid;
+  try {
+    const res = await apiFetch('/sessions', {}, 20000);
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(apiErrorText(data, 'Could not load saved conversations.'));
+    if (authenticatedUser?.uid !== ownerUid) return;
+    savedSessions = Array.isArray(data.sessions) ? data.sessions : [];
+    paintHistory();
+  } catch (error) {
+    if (authenticatedUser?.uid !== ownerUid) return;
+    savedSessions = [];
+    $('saved-plans-section').hidden = true;
+    $('history-empty').hidden = true;
+    $('history-error').textContent = error.message || 'Could not load saved conversations.';
+    $('history-error').hidden = false;
+  }
+}
+
+async function showHistory() {
+  switchView('history');
+  await refreshHistory();
+}
+
+async function openSavedSession(sessionId) {
+  const ownerUid = authenticatedUser?.uid;
+  if (!ownerUid) return;
+  const errorElement = $('history-error');
+  errorElement.hidden = true;
+  try {
+    const res = await apiFetch(`/sessions/${encodeURIComponent(sessionId)}`, {}, 20000);
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(apiErrorText(data, 'Could not open this conversation.'));
+    if (authenticatedUser?.uid !== ownerUid) return;
+    const state = data.state || {};
+    currentSessionId = data.session_id;
+    sessionPromise = null;
+    chatMessages.replaceChildren();
+    const conversation = Array.isArray(state.conversation) ? state.conversation : [];
+    if (!conversation.length) chatMessages.innerHTML = welcomeMessageHtml();
+    else conversation.forEach(message => {
+      if (message.role === 'user' || message.role === 'assistant') appendMessage(message.role, message.content || '');
+    });
+
+    if (state.context) {
+      if (state.context.lat !== null && state.context.lat !== undefined
+          && state.context.lon !== null && state.context.lon !== undefined) {
+        syncContextFromResponse(state.context);
+      } else if (state.context.location) {
+        setActiveLocation(null);
+        locationChipLabel.textContent = state.context.location;
+        locationChip.classList.remove('is-empty');
+        searchWhere.value = state.context.location;
+      } else {
+        setActiveLocation(null);
+      }
+      if (state.context.start_date) searchStart.value = state.context.start_date;
+      if (state.context.end_date) searchEnd.value = state.context.end_date;
+    }
+    if (state.plan) renderItineraryDrawer(state.plan, state.validation, state.context || {});
+    else {
+      itineraryEmptyState.style.display = 'block';
+      itineraryContent.style.display = 'none';
+      planTimelineContainer.replaceChildren();
+      lastPlanShown = false;
+      $('plan-badge').hidden = true;
+    }
+    setPlannerTab('chat');
+    switchView('planner');
+  } catch (error) {
+    switchView('history');
+    errorElement.textContent = error.message || 'Could not open this conversation.';
+    errorElement.hidden = false;
+  }
+}
+
+function renderProfileAvatar() {
+  const name = profileData?.display_name || authenticatedUser?.displayName || authenticatedUser?.email || '';
+  const initials = name.trim().split(/[\s@._-]+/).filter(Boolean).slice(0, 2).map(part => part[0]).join('').toUpperCase();
+  $('btn-profile').textContent = initials || '👤';
+}
+
+function setupProfileFormControls() {
+  const select = $('profile-travelers');
+  select.replaceChildren(...Array.from({ length: 20 }, (_, index) => {
+    const option = document.createElement('option');
+    option.value = String(index + 1);
+    option.textContent = `${index + 1} ${index === 0 ? 'traveller' : 'travellers'}`;
+    return option;
+  }));
+}
+
+function fillProfileForm(profile) {
+  $('profile-display-name').value = profile.display_name || '';
+  $('profile-hometown').value = profile.hometown || '';
+  $('profile-bio').value = profile.bio || '';
+  $('profile-languages').value = (profile.languages || []).join(', ');
+  $('profile-interests').value = (profile.interests || []).join(', ');
+  $('profile-travelers').value = String(profile.default_travelers || 1);
+  $('profile-currency').value = profile.preferred_currency || 'USD';
+  $('profile-trip-style').value = profile.preferred_trip_style || '';
+  $('profile-email').textContent = profile.email || authenticatedUser?.email || '';
+}
+
+async function loadProfile() {
+  if (!authenticatedUser) return null;
+  const ownerUid = authenticatedUser.uid;
+  try {
+    const res = await apiFetch('/profile', {}, 20000);
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(apiErrorText(data, 'Could not load your profile.'));
+    if (authenticatedUser?.uid !== ownerUid) return null;
+    profileData = data;
+    profileLoadedForUid = ownerUid;
+    const preferredTravelers = Number(data.default_travelers);
+    if (Number.isInteger(preferredTravelers) && preferredTravelers >= 1 && preferredTravelers <= MAX_TRAVELLERS) {
+      setTravellers(preferredTravelers);
+    }
+    authAccountLabel.textContent = data.display_name || authenticatedUser.email || 'Account';
+    renderProfileAvatar();
+    if (profileDialog.open) fillProfileForm(profileData);
+    return data;
+  } catch (error) {
+    $('profile-save-message').textContent = error.message || 'Could not load your profile.';
+    $('profile-save-message').classList.add('is-error');
+    return null;
+  }
+}
+
+async function openProfile() {
+  if (!authenticatedUser) return;
+  $('profile-save-message').textContent = '';
+  $('profile-save-message').classList.remove('is-error');
+  if (profileLoadedForUid !== authenticatedUser.uid) await loadProfile();
+  fillProfileForm(profileData || { email: authenticatedUser.email });
+  if (typeof profileDialog.showModal === 'function') profileDialog.showModal();
+  else profileDialog.setAttribute('open', '');
+}
+
+async function saveProfile(event) {
+  event.preventDefault();
+  if (!authenticatedUser) return;
+  const saveButton = $('btn-profile-save');
+  const message = $('profile-save-message');
+  const splitList = value => value.split(',').map(item => item.trim()).filter(Boolean);
+  const payload = {
+    display_name: $('profile-display-name').value.trim(),
+    hometown: $('profile-hometown').value.trim(),
+    bio: $('profile-bio').value.trim(),
+    languages: splitList($('profile-languages').value),
+    interests: splitList($('profile-interests').value),
+    default_travelers: Number($('profile-travelers').value) || 1,
+    preferred_currency: $('profile-currency').value.trim().toUpperCase() || 'USD',
+    preferred_trip_style: $('profile-trip-style').value.trim(),
+  };
+  saveButton.disabled = true;
+  message.classList.remove('is-error');
+  message.textContent = 'Saving…';
+  try {
+    const res = await apiFetch('/profile', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    }, 20000);
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(apiErrorText(data, 'Could not save your profile.'));
+    profileData = data;
+    profileLoadedForUid = authenticatedUser.uid;
+    authAccountLabel.textContent = data.display_name || authenticatedUser.email || 'Account';
+    renderProfileAvatar();
+    fillProfileForm(data);
+    message.textContent = 'Profile saved.';
+  } catch (error) {
+    message.textContent = error.message || 'Could not save your profile.';
+    message.classList.add('is-error');
+  } finally {
+    saveButton.disabled = false;
+  }
+}
+
+async function sendProfilePasswordReset() {
+  const message = $('profile-save-message');
+  const email = authenticatedUser?.email;
+  if (!email || !firebaseAuthSdk || !firebaseAuth) {
+    message.textContent = 'This account does not have an email address for password reset.';
+    message.classList.add('is-error');
+    return;
+  }
+  message.classList.remove('is-error');
+  try {
+    await firebaseAuthSdk.sendPasswordResetEmail(firebaseAuth, email);
+    message.textContent = `Password reset email sent to ${email}.`;
+  } catch (error) {
+    message.textContent = friendlyAuthError(error);
+    message.classList.add('is-error');
+  }
 }
 
 
@@ -986,6 +1264,7 @@ function describeDates(dates) {
    5. API CLIENT & SESSION MANAGEMENT
    ===================================================================== */
 let sessionPromise = null;
+let sessionInitError = '';
 
 function ensureSession(forceNew = false) {
   if (currentSessionId && !forceNew) return Promise.resolve(currentSessionId);
@@ -1001,13 +1280,15 @@ function ensureSession(forceNew = false) {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({}),
       }, 20000);
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const data = await res.json();
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(apiErrorText(data, `Could not start a planning session (HTTP ${res.status}).`));
       if (authenticatedUser?.uid !== ownerUid) return null;
       currentSessionId = data.session_id;
+      sessionInitError = '';
       return currentSessionId;
     } catch (err) {
       console.error('Session creation failed:', err);
+      sessionInitError = err.message || 'Could not start a planning session.';
       currentSessionId = null;
       return null;
     } finally {
@@ -1244,7 +1525,7 @@ async function handleUserSend(text, options = {}) {
 
   try {
     let sessionId = await ensureSession();
-    if (!sessionId) throw new Error('backend unreachable');
+    if (!sessionId) throw new Error(sessionInitError || 'Could not start a planning session.');
     req.sessionId = sessionId;
     if (req.cancelled) throw new DOMException('Stopped', 'AbortError');
 
@@ -1270,6 +1551,7 @@ async function handleUserSend(text, options = {}) {
 
     if (data.plan) renderItineraryDrawer(data.plan, data.validation, data.context || {});
     syncContextFromResponse(data.context);
+    refreshHistory();
     if (data.context && data.context.llm_provider) {
       llmBadge.textContent = `AI: ${data.context.llm_provider}`;
     }
@@ -1853,6 +2135,7 @@ document.addEventListener('DOMContentLoaded', () => {
   setupLocationControls();
   setupDateInputs();
   setupTravellers();
+  setupProfileFormControls();
   renderDestinations();
   setupPromptCardsAndCapsule();
   renderLocation();
