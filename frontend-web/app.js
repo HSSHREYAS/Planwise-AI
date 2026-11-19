@@ -2,6 +2,7 @@
  * PlanWise AI — Frontend Application Controller
  * Multi-theme · location-aware · date-aware interactive planning
  */
+import { openStreetMapUrl } from './osm-links.js';
 
 // --- Configuration & API ---
 // Same origin everywhere: the Vite dev server proxies /api to the backend, and in
@@ -1794,9 +1795,9 @@ function renderResultCard(r, domain) {
   if (r.phone) details.push(`<div>📞 ${escapeHtml(r.phone)}</div>`);
 
   const links = [];
-  const mapUrl = safeUrl(r.map_url)
-    || (typeof r.lat === 'number' && typeof r.lon === 'number'
-      ? `https://www.openstreetmap.org/?mlat=${r.lat}&mlon=${r.lon}#map=17/${r.lat}/${r.lon}` : null);
+  const mapUrl = safeUrl(r.map_url) || openStreetMapUrl({
+    lat: r.lat, lon: r.lon, name: r.name, location: r.area,
+  });
   if (mapUrl) links.push(`<a href="${escapeHtml(mapUrl)}" target="_blank" rel="noopener noreferrer">View on map ↗</a>`);
   const site = safeUrl(r.website);
   if (site) links.push(`<a href="${escapeHtml(site)}" target="_blank" rel="noopener noreferrer">Website ↗</a>`);
@@ -1964,7 +1965,12 @@ function renderItineraryDrawer(plan, validation, context) {
           cost += a.type === 'hotel' ? '/room' : ' pp';     // per room / per person
         }
         const suggested = details.source === 'ai_suggested';
-        const mapUrl = safeUrl(details.map_url);
+        const mapUrl = safeUrl(details.map_url) || openStreetMapUrl({
+          lat: details.lat,
+          lon: details.lon,
+          name: a.name,
+          location: plan.location || context.location,
+        });
         return `
           <div class="slot-activity">
             <div class="slot-activity-main">
