@@ -10,6 +10,37 @@
 </head>
 <body>
 
+  <section class="auth-gate" id="auth-gate" aria-labelledby="auth-title">
+    <div class="auth-card">
+      <div class="auth-brand"><span class="auth-brand-icon">🗺️</span><span>PlanWise AI</span></div>
+      <p class="auth-eyebrow">YOUR PERSONAL PLANNING SPACE</p>
+      <h1 id="auth-title">Sign in to continue</h1>
+      <p class="auth-intro" id="auth-intro">Sign in or create an account to use your planner.</p>
+
+      <form id="auth-form" class="auth-form" hidden>
+        <div class="auth-field" id="auth-name-row" hidden>
+          <label for="auth-name">Name</label>
+          <input id="auth-name" type="text" autocomplete="name" maxlength="80" />
+        </div>
+        <div class="auth-field">
+          <label for="auth-email">Email</label>
+          <input id="auth-email" type="email" autocomplete="email" required maxlength="254" />
+        </div>
+        <div class="auth-field">
+          <label for="auth-password">Password</label>
+          <input id="auth-password" type="password" autocomplete="current-password" required minlength="8" />
+        </div>
+        <button class="btn-primary auth-submit" id="auth-submit" type="submit">Sign in</button>
+      </form>
+
+      <p class="auth-message" id="auth-message" role="status" aria-live="polite">Connecting to secure sign-in…</p>
+      <button class="auth-text-button" id="auth-mode-toggle" type="button" hidden>Create an account</button>
+      <button class="auth-text-button" id="auth-reset" type="button" hidden>Forgot your password?</button>
+      <button class="btn-secondary auth-retry" id="auth-retry" type="button" hidden>Try again</button>
+      <p class="auth-setup-note" id="auth-setup-note" hidden></p>
+    </div>
+  </section>
+
   <!-- =====================================================================
        NAVIGATION BAR
        ===================================================================== -->
@@ -29,6 +60,10 @@
       </nav>
 
       <div class="nav-actions">
+        <div class="auth-account" id="auth-account" hidden>
+          <span class="auth-account-label" id="auth-account-label"></span>
+          <button class="auth-sign-out" id="auth-sign-out" type="button">Sign out</button>
+        </div>
         <!-- 3-Way Theme Switcher -->
         <div class="theme-switcher" role="group" aria-label="Theme Selector">
           <button class="theme-btn active" data-theme-val="light" title="Light mode">

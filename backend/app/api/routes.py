@@ -12,9 +12,10 @@ import logging
 import threading
 from typing import List
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 
 from app import money
+from app.auth import get_current_user, public_firebase_config
 from app.geo import geocoder, places
 from app.geo.geocoder import Place
 from app.llm.client import get_llm_client
@@ -34,6 +35,12 @@ from app.validation.constraints import validate_plan
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/v1")
+
+
+@router.get("/auth/config")
+def auth_config():
+    """Return browser-safe Firebase settings and whether sign-in is configured."""
+    return public_firebase_config()
 
 
 # ── Health ──────────────────────────────────────────────────────
@@ -125,16 +132,26 @@ def geo_prefetch(
 
 # ── Sessions ────────────────────────────────────────────────────
 
+def _require_owned_session(session_id: str, user: dict) -> None:
+    if not session_service.session_belongs_to(session_id, user["uid"]):
+        # Do not reveal whether another account's session ID exists.
+        raise HTTPException(status_code=404, detail="Session not found")
+
+
 @router.post("/sessions", response_model=SessionCreateResponse, status_code=201)
-def create_session(request: SessionCreateRequest = None):
+def create_session(
+    request: SessionCreateRequest = None,
+    user: dict = Depends(get_current_user),
+):
     """POST /api/v1/sessions - create a new planning session."""
-    session_id = session_service.create_session()
+    session_id = session_service.create_session(owner_uid=user["uid"])
     return SessionCreateResponse(session_id=session_id, status="active")
 
 
 @router.get("/sessions/{session_id}", response_model=SessionResponse)
-def get_session(session_id: str):
+def get_session(session_id: str, user: dict = Depends(get_current_user)):
     """GET /api/v1/sessions/{session_id} - current session state."""
+    _require_owned_session(session_id, user)
     state = session_service.get_session(session_id)
     if state is None:
         raise HTTPException(status_code=404, detail="Session not found")
@@ -161,15 +178,18 @@ def get_session(session_id: str):
 # ── Messages ────────────────────────────────────────────────────
 
 @router.post("/sessions/{session_id}/messages")
-def send_message(session_id: str, request: MessageRequest):
+def send_message(
+    session_id: str,
+    request: MessageRequest,
+    user: dict = Depends(get_current_user),
+):
     """
     POST /api/v1/sessions/{session_id}/messages
 
     Main frontend-to-agent endpoint. Optional `context` carries the
     location and dates picked in the UI.
     """
-    if not session_service.session_exists(session_id):
-        raise HTTPException(status_code=404, detail="Session not found")
+    _require_owned_session(session_id, user)
 
     message = request.message.strip()
     if not message:
@@ -182,15 +202,18 @@ def send_message(session_id: str, request: MessageRequest):
 
 
 @router.post("/sessions/{session_id}/messages/{request_id}/cancel", status_code=202)
-def cancel_message(session_id: str, request_id: str):
+def cancel_message(
+    session_id: str,
+    request_id: str,
+    user: dict = Depends(get_current_user),
+):
     """
     POST /api/v1/sessions/{session_id}/messages/{request_id}/cancel
 
     Stop button: the message's result is discarded and the session stays as
     it was before that message.
     """
-    if not session_service.session_exists(session_id):
-        raise HTTPException(status_code=404, detail="Session not found")
+    _require_owned_session(session_id, user)
     if len(request_id) > 64:
         raise HTTPException(status_code=422, detail="Invalid request id")
     session_service.cancel(session_id, request_id)
@@ -200,8 +223,9 @@ def cancel_message(session_id: str, request_id: str):
 # ── Plan ────────────────────────────────────────────────────────
 
 @router.get("/sessions/{session_id}/plan", response_model=PlanResponse)
-def get_plan(session_id: str):
+def get_plan(session_id: str, user: dict = Depends(get_current_user)):
     """GET /api/v1/sessions/{session_id}/plan - current plan."""
+    _require_owned_session(session_id, user)
     state = session_service.get_session(session_id)
     if state is None:
         raise HTTPException(status_code=404, detail="Session not found")
@@ -220,10 +244,13 @@ def get_plan(session_id: str):
 # ── Replan ──────────────────────────────────────────────────────
 
 @router.post("/sessions/{session_id}/replan")
-def replan(session_id: str, request: ReplanRequest):
+def replan(
+    session_id: str,
+    request: ReplanRequest,
+    user: dict = Depends(get_current_user),
+):
     """POST /api/v1/sessions/{session_id}/replan - replan with changes."""
-    if not session_service.session_exists(session_id):
-        raise HTTPException(status_code=404, detail="Session not found")
+    _require_owned_session(session_id, user)
 
     logger.info(f"Replan request for session {session_id}: {request.changes}")
     response = session_service.replan(session_id, request.changes)

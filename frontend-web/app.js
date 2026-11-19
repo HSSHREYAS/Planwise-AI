@@ -18,6 +18,13 @@ const LOCATION_STORAGE_KEY = 'planwise_location';
 let currentSessionId = null;
 let isWaitingResponse = false;
 let limitedMode = false;
+let authenticatedUser = null;
+let firebaseAuth = null;
+let firebaseAuthSdk = null;
+let firebaseAuthInitTask = null;
+let authUiBound = false;
+let authMode = 'signin';
+let experienceInitializedForUid = null;
 
 /**
  * The location every request is planned for.
@@ -46,6 +53,21 @@ const navBrand = $('nav-brand');
 const btnLaunchPlanner = $('btn-launch-planner');
 const btnBackExplore = $('btn-back-explore');
 const btnNewChat = $('btn-new-chat');
+const authGate = $('auth-gate');
+const authForm = $('auth-form');
+const authEmail = $('auth-email');
+const authPassword = $('auth-password');
+const authName = $('auth-name');
+const authNameRow = $('auth-name-row');
+const authSubmit = $('auth-submit');
+const authMessage = $('auth-message');
+const authModeToggle = $('auth-mode-toggle');
+const authReset = $('auth-reset');
+const authRetry = $('auth-retry');
+const authSetupNote = $('auth-setup-note');
+const authAccount = $('auth-account');
+const authAccountLabel = $('auth-account-label');
+const authSignOut = $('auth-sign-out');
 
 const chatMessages = $('chat-messages');
 const chatInput = $('chat-input');
@@ -186,6 +208,11 @@ function debounce(fn, wait) {
  * fetch with a timeout. `options.signal` (e.g. the Stop button) can abort it too.
  */
 async function apiFetch(path, options = {}, timeoutMs = REQUEST_TIMEOUT_MS) {
+  const headers = new Headers(options.headers || {});
+  if (/^\/sessions(?:\/|$)/.test(path)) {
+    if (!authenticatedUser) throw new Error('Sign in to use your planning sessions.');
+    headers.set('Authorization', `Bearer ${await authenticatedUser.getIdToken()}`);
+  }
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   const external = options.signal;
@@ -195,11 +222,226 @@ async function apiFetch(path, options = {}, timeoutMs = REQUEST_TIMEOUT_MS) {
     else external.addEventListener('abort', forwardAbort, { once: true });
   }
   try {
-    return await fetch(`${API_BASE}${path}`, { ...options, signal: controller.signal });
+    return await fetch(`${API_BASE}${path}`, { ...options, headers, signal: controller.signal });
   } finally {
     clearTimeout(timer);
     if (external) external.removeEventListener('abort', forwardAbort);
   }
+}
+
+function setAuthMessage(message, isError = false) {
+  authMessage.textContent = message || '';
+  authMessage.classList.toggle('is-error', Boolean(isError));
+}
+
+function setAuthMode(mode) {
+  authMode = mode;
+  const creating = mode === 'signup';
+  authNameRow.hidden = !creating;
+  authName.required = false;
+  authPassword.autocomplete = creating ? 'new-password' : 'current-password';
+  authSubmit.textContent = creating ? 'Create account' : 'Sign in';
+  authModeToggle.textContent = creating ? 'Already have an account? Sign in' : 'Create an account';
+  authReset.hidden = creating;
+  $('auth-title').textContent = creating ? 'Create your account' : 'Sign in to continue';
+  $('auth-intro').textContent = creating
+    ? 'Set up an account to use your personal planning space.'
+    : 'Sign in or create an account to use your planner.';
+  setAuthMessage('');
+}
+
+function showAuthSetupIssue(message, note = '') {
+  authGate.hidden = false;
+  authForm.hidden = true;
+  authModeToggle.hidden = true;
+  authReset.hidden = true;
+  authRetry.hidden = false;
+  authSetupNote.hidden = !note;
+  authSetupNote.textContent = note;
+  setAuthMessage(message, true);
+}
+
+function friendlyAuthError(error) {
+  const messages = {
+    'auth/invalid-email': 'Enter a valid email address.',
+    'auth/invalid-credential': 'Email or password is incorrect.',
+    'auth/wrong-password': 'Email or password is incorrect.',
+    'auth/user-not-found': 'Email or password is incorrect.',
+    'auth/email-already-in-use': 'An account already uses this email. Sign in instead.',
+    'auth/weak-password': 'Choose a stronger password with at least 8 characters.',
+    'auth/too-many-requests': 'Too many attempts. Wait a little and try again.',
+    'auth/network-request-failed': 'Could not reach Firebase. Check your connection and try again.',
+    'auth/operation-not-allowed': 'Email and password sign-in is not enabled in Firebase yet.',
+  };
+  return messages[error?.code] || 'Sign-in failed. Check your details and try again.';
+}
+
+function bindFirebaseAuthUi() {
+  if (authUiBound) return;
+  authUiBound = true;
+
+  authForm.addEventListener('submit', async event => {
+    event.preventDefault();
+    authSubmit.disabled = true;
+    setAuthMessage(authMode === 'signup' ? 'Creating your account…' : 'Signing in…');
+    try {
+      const email = authEmail.value.trim();
+      const password = authPassword.value;
+      if (authMode === 'signup') {
+        const result = await firebaseAuthSdk.createUserWithEmailAndPassword(firebaseAuth, email, password);
+        const displayName = authName.value.trim();
+        if (displayName) {
+          try {
+            await firebaseAuthSdk.updateProfile(result.user, { displayName });
+            authAccountLabel.textContent = displayName;
+          } catch (error) {
+            console.warn('Could not save the Firebase display name:', error);
+          }
+        }
+      } else {
+        await firebaseAuthSdk.signInWithEmailAndPassword(firebaseAuth, email, password);
+      }
+      authPassword.value = '';
+    } catch (error) {
+      setAuthMessage(friendlyAuthError(error), true);
+    } finally {
+      authSubmit.disabled = false;
+    }
+  });
+
+  authModeToggle.addEventListener('click', () => {
+    setAuthMode(authMode === 'signin' ? 'signup' : 'signin');
+  });
+
+  authReset.addEventListener('click', async () => {
+    const email = authEmail.value.trim();
+    if (!email) {
+      authEmail.focus();
+      setAuthMessage('Enter your email address first.', true);
+      return;
+    }
+    try {
+      await firebaseAuthSdk.sendPasswordResetEmail(firebaseAuth, email);
+      setAuthMessage('Password reset email sent. Check your inbox.');
+    } catch (error) {
+      setAuthMessage(friendlyAuthError(error), true);
+    }
+  });
+
+  authSignOut.addEventListener('click', async () => {
+    authSignOut.disabled = true;
+    try {
+      await firebaseAuthSdk.signOut(firebaseAuth);
+    } catch {
+      setAuthMessage('Could not sign out. Please try again.', true);
+    } finally {
+      authSignOut.disabled = false;
+    }
+  });
+}
+
+function applyAuthState(user) {
+  const previousUid = authenticatedUser?.uid || null;
+  if (!user && authenticatedUser && activeRequest) stopActiveRequest();
+  authenticatedUser = user || null;
+
+  if (!authenticatedUser) {
+    if (previousUid) {
+      currentSessionId = null;
+      sessionPromise = null;
+      experienceInitializedForUid = null;
+      chatMessages.innerHTML = welcomeMessageHtml();
+    }
+    authGate.hidden = false;
+    authAccount.hidden = true;
+    setAuthMessage('Sign in or create an account to continue.');
+    return;
+  }
+
+  if (previousUid && previousUid !== authenticatedUser.uid) {
+    currentSessionId = null;
+    sessionPromise = null;
+    chatMessages.innerHTML = welcomeMessageHtml();
+  }
+  authGate.hidden = true;
+  authAccount.hidden = false;
+  authAccountLabel.textContent = authenticatedUser.displayName || authenticatedUser.email || 'Account';
+
+  if (experienceInitializedForUid !== authenticatedUser.uid) {
+    experienceInitializedForUid = authenticatedUser.uid;
+    checkBackendHealth();
+    initLocation().then(() => {
+      if (chatMessages.children.length === 1) chatMessages.innerHTML = welcomeMessageHtml();
+    });
+  }
+}
+
+async function initializeFirebaseAuth() {
+  if (firebaseAuthInitTask) return firebaseAuthInitTask;
+  authRetry.disabled = true;
+  authRetry.hidden = true;
+  authSetupNote.hidden = true;
+  authForm.hidden = true;
+  authModeToggle.hidden = true;
+  authReset.hidden = true;
+  setAuthMessage('Connecting to secure sign-in…');
+
+  firebaseAuthInitTask = (async () => {
+    try {
+      const response = await apiFetch('/auth/config', {}, 15000);
+      if (!response.ok) throw new Error('Could not load sign-in settings.');
+      const setup = await response.json();
+      if (!setup.configured || !setup.firebase) {
+        showAuthSetupIssue(
+          'Firebase sign-in is not configured yet.',
+          'Add the Firebase web settings and Admin service-account values to the server environment, then reload this page.',
+        );
+        return;
+      }
+
+      const sdkVersion = '13.3.0';
+      const [appSdk, authSdk] = await Promise.all([
+        import(`https://www.gstatic.com/firebasejs/${sdkVersion}/firebase-app.js`),
+        import(`https://www.gstatic.com/firebasejs/${sdkVersion}/firebase-auth.js`),
+      ]);
+      const app = appSdk.getApps().length ? appSdk.getApp() : appSdk.initializeApp(setup.firebase);
+      firebaseAuth = authSdk.getAuth(app);
+      firebaseAuthSdk = authSdk;
+      bindFirebaseAuthUi();
+      setAuthMode('signin');
+      authForm.hidden = false;
+      authModeToggle.hidden = false;
+      authReset.hidden = false;
+      authRetry.hidden = true;
+      authSetupNote.hidden = true;
+
+      await new Promise(resolve => {
+        let initialState = true;
+        firebaseAuthSdk.onAuthStateChanged(firebaseAuth, user => {
+          applyAuthState(user);
+          if (initialState) {
+            initialState = false;
+            resolve();
+          }
+        }, () => {
+          showAuthSetupIssue('Could not restore your Firebase sign-in. Try again.');
+          if (initialState) {
+            initialState = false;
+            resolve();
+          }
+        });
+      });
+    } catch (error) {
+      console.error('Firebase sign-in setup failed:', error);
+      showAuthSetupIssue(
+        'Could not load secure sign-in. Check your connection and Firebase configuration.',
+      );
+    } finally {
+      authRetry.disabled = false;
+      firebaseAuthInitTask = null;
+    }
+  })();
+  return firebaseAuthInitTask;
 }
 
 function newRequestId() {
@@ -747,8 +989,10 @@ let sessionPromise = null;
 
 function ensureSession(forceNew = false) {
   if (currentSessionId && !forceNew) return Promise.resolve(currentSessionId);
+  if (!authenticatedUser) return Promise.resolve(null);
   // callers that arrive while a session is being created share that request
   if (sessionPromise && !forceNew) return sessionPromise;
+  const ownerUid = authenticatedUser.uid;
 
   const request = (async () => {
     try {
@@ -759,6 +1003,7 @@ function ensureSession(forceNew = false) {
       }, 20000);
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const data = await res.json();
+      if (authenticatedUser?.uid !== ownerUid) return null;
       currentSessionId = data.session_id;
       return currentSessionId;
     } catch (err) {
@@ -1603,6 +1848,7 @@ function setupPromptCardsAndCapsule() {
    ===================================================================== */
 document.addEventListener('DOMContentLoaded', () => {
   initTheme();
+  authRetry.addEventListener('click', initializeFirebaseAuth);
   setupNavigation();
   setupLocationControls();
   setupDateInputs();
@@ -1611,9 +1857,5 @@ document.addEventListener('DOMContentLoaded', () => {
   setupPromptCardsAndCapsule();
   renderLocation();
   chatMessages.innerHTML = welcomeMessageHtml();
-  checkBackendHealth();
-  initLocation().then(() => {
-    // refresh the welcome text once the location is known (if untouched)
-    if (chatMessages.children.length === 1) chatMessages.innerHTML = welcomeMessageHtml();
-  });
+  initializeFirebaseAuth();
 });

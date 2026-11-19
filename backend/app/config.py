@@ -68,6 +68,19 @@ BACKEND_PORT = int(os.getenv("BACKEND_PORT", "8000"))
 # Logging
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
 
+# ── Firebase Authentication ───────────────────────────────────────
+# Browser config is public and is returned only by the auth config endpoint.
+FIREBASE_WEB_API_KEY = os.getenv("FIREBASE_WEB_API_KEY", "").strip()
+FIREBASE_AUTH_DOMAIN = os.getenv("FIREBASE_AUTH_DOMAIN", "").strip()
+FIREBASE_PROJECT_ID = os.getenv("FIREBASE_PROJECT_ID", "").strip()
+FIREBASE_APP_ID = os.getenv("FIREBASE_APP_ID", "").strip()
+
+# Admin credentials stay on the server. Store private-key newlines as literal
+# \\n sequences in .env / Render and restore them before creating credentials.
+FIREBASE_ADMIN_CLIENT_EMAIL = os.getenv("FIREBASE_ADMIN_CLIENT_EMAIL", "").strip()
+FIREBASE_ADMIN_PRIVATE_KEY_ID = os.getenv("FIREBASE_ADMIN_PRIVATE_KEY_ID", "").strip()
+FIREBASE_ADMIN_PRIVATE_KEY = os.getenv("FIREBASE_ADMIN_PRIVATE_KEY", "").strip().replace("\\n", "\n")
+
 # Agent
 MAX_REPLAN_ATTEMPTS = int(os.getenv("MAX_REPLAN_ATTEMPTS", "2"))
 MAX_TRIP_DAYS = int(os.getenv("MAX_TRIP_DAYS", "14"))

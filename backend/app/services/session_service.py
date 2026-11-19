@@ -42,12 +42,13 @@ class SessionService:
     def __init__(self):
         self._sessions: Dict[str, PlanState] = {}
         self._versions: Dict[str, int] = {}
+        self._owners: Dict[str, str] = {}
         self._lock = threading.Lock()   # guards the dictionaries, never held during agent work
         self._cancelled: "OrderedDict[str, None]" = OrderedDict()
         self._agent = PlanningAgent()
         self._state_manager = StateManager()
 
-    def create_session(self) -> str:
+    def create_session(self, owner_uid: Optional[str] = None) -> str:
         """Create a new planning session. Returns session_id."""
         state = self._state_manager.create_state()
         with self._lock:
@@ -56,8 +57,11 @@ class SessionService:
                 for old_id in list(self._sessions)[: self.MAX_SESSIONS // 10]:
                     self._sessions.pop(old_id, None)
                     self._versions.pop(old_id, None)
+                    self._owners.pop(old_id, None)
             self._sessions[state.session_id] = state
             self._versions[state.session_id] = 0
+            if owner_uid:
+                self._owners[state.session_id] = owner_uid
         logger.info(f"Session created: {state.session_id}")
         return state.session_id
 
@@ -178,6 +182,11 @@ class SessionService:
     def session_exists(self, session_id: str) -> bool:
         """Check if a session exists."""
         return session_id in self._sessions
+
+    def session_belongs_to(self, session_id: str, owner_uid: str) -> bool:
+        """Check whether a session belongs to a Firebase user."""
+        with self._lock:
+            return self._owners.get(session_id) == owner_uid
 
     def get_session_count(self) -> int:
         """Get number of active sessions."""

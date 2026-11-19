@@ -116,6 +116,18 @@ GROQ_API_KEY=your_key
 
 `auto` tries configured providers in order, then falls back to Pollinations. See `.env.example` for all provider, timeout, geocoding, retrieval, and agent settings. Never commit `.env` or API keys.
 
+## Firebase sign-in
+
+The web app uses Firebase Authentication with email and password. The backend verifies Firebase ID tokens before creating or accessing a planning session, and each session is scoped to the signed-in Firebase user. Firebase's browser app settings are served from the backend; the Admin SDK private key stays server-side.
+
+1. Create a Firebase project, register a Web app, and enable **Email/Password** in Authentication → Sign-in method.
+2. Add the deployed site domain (for example, `planwise-ai-bqcm.onrender.com`) under Authentication → Settings → Authorized domains. Add `localhost` for local development.
+3. Copy the Web app's API key, auth domain, project ID, and app ID into `FIREBASE_WEB_API_KEY`, `FIREBASE_AUTH_DOMAIN`, `FIREBASE_PROJECT_ID`, and `FIREBASE_APP_ID` in your ignored local `.env`.
+4. In Firebase Project settings → Service accounts, generate a private key. Copy its `client_email`, `private_key_id`, and `private_key` into the matching `FIREBASE_ADMIN_*` settings. Store the private key as one line with newline characters written as `\n`.
+5. Add the same seven variables to the Render service environment before deploying. The browser API key is public app configuration; the Admin private key is a secret and must never be committed or sent to the browser.
+
+Until both the Web app settings and Admin credentials are present, the app shows a setup message and session APIs remain unavailable. Session state is still held in server memory, so signing in does not preserve trip history across a server restart.
+
 ## API
 
 All endpoints use the `/api/v1` prefix.
