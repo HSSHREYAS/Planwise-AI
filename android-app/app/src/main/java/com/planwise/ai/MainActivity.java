@@ -69,6 +69,7 @@ public class MainActivity extends Activity {
     // Pending website request for the user's location while Android asks for permission
     private String pendingGeoOrigin;
     private GeolocationPermissions.Callback pendingGeoCallback;
+    private boolean locationPermissionRequestPending = false;
 
     private final Handler handler = new Handler(Looper.getMainLooper());
     private final Executor mainExecutor = handler::post;
@@ -146,7 +147,6 @@ public class MainActivity extends Activity {
             @Override
             public void onPageStarted(WebView view, String url, Bitmap favicon) {
                 mainFrameFailed = false;
-                injectGeolocationBridge();
             }
 
             @Override
@@ -154,7 +154,6 @@ public class MainActivity extends Activity {
                 if (!mainFrameFailed) {
                     firstPageLoaded = true;
                     showContent();
-                    injectGeolocationBridge();
                 }
             }
 
@@ -173,9 +172,6 @@ public class MainActivity extends Activity {
             public void onProgressChanged(WebView view, int newProgress) {
                 progressBar.setProgress(newProgress);
                 progressBar.setVisibility(newProgress < 100 && firstPageLoaded ? View.VISIBLE : View.GONE);
-                if (newProgress > 20) {
-                    injectGeolocationBridge();
-                }
             }
 
             @Override
@@ -258,12 +254,13 @@ public class MainActivity extends Activity {
     }
 
     private void requestLocationPermissionIfNeeded() {
-        if (!hasLocationPermission()) {
-            requestPermissions(new String[]{
-                    Manifest.permission.ACCESS_FINE_LOCATION,
-                    Manifest.permission.ACCESS_COARSE_LOCATION,
-            }, LOCATION_REQUEST);
-        }
+        if (hasLocationPermission() || locationPermissionRequestPending) return;
+
+        locationPermissionRequestPending = true;
+        requestPermissions(new String[]{
+                Manifest.permission.ACCESS_FINE_LOCATION,
+                Manifest.permission.ACCESS_COARSE_LOCATION,
+        }, LOCATION_REQUEST);
     }
 
     @SuppressLint("MissingPermission")
@@ -309,6 +306,12 @@ public class MainActivity extends Activity {
                 } catch (Throwable ignored) {}
             }
         }
+        // A saved location can be days old. Use it only as a fast path when it
+        // still represents the device's current position; otherwise request a
+        // fresh fix below.
+        if (bestLocation != null && System.currentTimeMillis() - bestTime > 15 * 60 * 1000L) {
+            return null;
+        }
         return bestLocation;
     }
 
@@ -318,37 +321,19 @@ public class MainActivity extends Activity {
             return;
         }
 
-        // 1. Immediately send cached location if available
-        Location cached = getBestLastKnownLocation();
-        if (cached != null) {
-            pushLocationToWeb(cached);
-        }
-
         stopLocationUpdates();
 
-        // 2. Modern Android 11+ (API 30+): getCurrentLocation
+        // 2. Modern Android 11+ (API 30+): ask all enabled location providers.
+        // Some devices expose only the fused provider, while others expose the
+        // network and GPS providers.
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-            try {
-                if (locationManager.isProviderEnabled(LocationManager.NETWORK_PROVIDER)) {
-                    locationManager.getCurrentLocation(
-                            LocationManager.NETWORK_PROVIDER,
-                            null,
-                            mainExecutor,
-                            this::pushLocationToWeb
-                    );
-                }
-                if (locationManager.isProviderEnabled(LocationManager.GPS_PROVIDER)) {
-                    locationManager.getCurrentLocation(
-                            LocationManager.GPS_PROVIDER,
-                            null,
-                            mainExecutor,
-                            this::pushLocationToWeb
-                    );
-                }
-                return;
-            } catch (Throwable e) {
-                Log.w(TAG, "getCurrentLocation failed, falling back to listener", e);
+            boolean requested = false;
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                requested |= requestCurrentLocation(LocationManager.FUSED_PROVIDER);
             }
+            requested |= requestCurrentLocation(LocationManager.NETWORK_PROVIDER);
+            requested |= requestCurrentLocation(LocationManager.GPS_PROVIDER);
+            if (requested) return;
         }
 
         // Fallback for API < 30 or if getCurrentLocation fails
@@ -384,6 +369,20 @@ public class MainActivity extends Activity {
 
         if (requested) {
             handler.postDelayed(this::stopLocationUpdates, 20000L);
+        } else {
+            notifyWebLocationError("Turn on device location and try again.");
+        }
+    }
+
+    @SuppressLint("MissingPermission")
+    private boolean requestCurrentLocation(String provider) {
+        try {
+            if (!locationManager.isProviderEnabled(provider)) return false;
+            locationManager.getCurrentLocation(provider, null, mainExecutor, this::pushLocationToWeb);
+            return true;
+        } catch (Throwable e) {
+            Log.w(TAG, "Could not request location from " + provider, e);
+            return false;
         }
     }
 
@@ -411,49 +410,10 @@ public class MainActivity extends Activity {
         });
     }
 
-    private void injectGeolocationBridge() {
-        if (webView == null) return;
-        String script = "(function(){\n" +
-                "  if (window.__planwise_geo_patched) return;\n" +
-                "  window.__planwise_geo_patched = true;\n" +
-                "  if (!window.AndroidLocationBridge) return;\n" +
-                "  var orig = navigator.geolocation.getCurrentPosition.bind(navigator.geolocation);\n" +
-                "  navigator.geolocation.getCurrentPosition = function(success, error, options) {\n" +
-                "    try {\n" +
-                "      var raw = window.AndroidLocationBridge.getDeviceLocation();\n" +
-                "      if (raw) {\n" +
-                "        var p = JSON.parse(raw);\n" +
-                "        if (p && typeof p.lat === 'number' && typeof p.lon === 'number') {\n" +
-                "          success({\n" +
-                "            coords: {\n" +
-                "              latitude: p.lat,\n" +
-                "              longitude: p.lon,\n" +
-                "              accuracy: p.accuracy || 25,\n" +
-                "              altitude: null,\n" +
-                "              altitudeAccuracy: null,\n" +
-                "              heading: null,\n" +
-                "              speed: null\n" +
-                "            },\n" +
-                "            timestamp: p.time || Date.now()\n" +
-                "          });\n" +
-                "          return;\n" +
-                "        }\n" +
-                "      }\n" +
-                "    } catch(e) { console.warn('Bridge location parse error', e); }\n" +
-                "    window.AndroidLocationBridge.requestDeviceLocation();\n" +
-                "    orig(success, error, options);\n" +
-                "  };\n" +
-                "})();";
-        webView.evaluateJavascript(script, null);
-    }
-
     public class WebAppInterface {
         @JavascriptInterface
         public String getDeviceLocation() {
-            if (!hasLocationPermission()) {
-                handler.post(MainActivity.this::requestLocationPermissionIfNeeded);
-                return null;
-            }
+            if (!hasLocationPermission()) return null;
             Location loc = getBestLastKnownLocation();
             if (loc != null) {
                 return String.format(Locale.US,
@@ -462,19 +422,12 @@ public class MainActivity extends Activity {
                         loc.hasAccuracy() ? loc.getAccuracy() : 25.0f,
                         loc.getTime());
             }
-            handler.post(MainActivity.this::requestFreshLocation);
             return null;
         }
 
         @JavascriptInterface
         public void requestDeviceLocation() {
-            handler.post(() -> {
-                if (hasLocationPermission()) {
-                    requestFreshLocation();
-                } else {
-                    requestLocationPermissionIfNeeded();
-                }
-            });
+            handler.post(MainActivity.this::requestDeviceLocationFromWeb);
         }
 
         @JavascriptInterface
@@ -483,12 +436,29 @@ public class MainActivity extends Activity {
         }
     }
 
+    private void requestDeviceLocationFromWeb() {
+        if (hasLocationPermission()) {
+            requestFreshLocation();
+        } else {
+            requestLocationPermissionIfNeeded();
+        }
+    }
+
+    private void notifyWebLocationError(String message) {
+        if (webView == null) return;
+        String quoted = org.json.JSONObject.quote(message);
+        handler.post(() -> webView.evaluateJavascript(
+                "if (typeof window.onNativeLocationError === 'function') { window.onNativeLocationError(" + quoted + "); }",
+                null));
+    }
+
     @Override
     public void onRequestPermissionsResult(int requestCode, String[] permissions, int[] grantResults) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults);
         if (requestCode != LOCATION_REQUEST) {
             return;
         }
+        locationPermissionRequestPending = false;
         boolean granted = hasLocationPermission();
         if (pendingGeoCallback != null) {
             pendingGeoCallback.invoke(pendingGeoOrigin, granted, true);
@@ -497,16 +467,9 @@ public class MainActivity extends Activity {
         }
         if (granted) {
             requestFreshLocation();
-            // Automatically invoke detectCurrentLocation in the web page now that permission is active
-            handler.postDelayed(() -> {
-                if (webView != null) {
-                    webView.evaluateJavascript(
-                            "(function(){ if (typeof detectCurrentLocation === 'function') { detectCurrentLocation({ adopt: true }); } })()",
-                            null);
-                }
-            }, 600);
         } else {
             Toast.makeText(this, R.string.location_denied, Toast.LENGTH_LONG).show();
+            notifyWebLocationError("Location permission was denied. Allow location access in app settings and try again.");
         }
     }
 

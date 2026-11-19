@@ -27,6 +27,7 @@ let limitedMode = false;
  */
 let activeLocation = null;
 let gpsLocation = null;
+let nativeLocationRequest = null;
 
 /** Number of people travelling; costs and budget are split between them. */
 const TRAVELLERS_STORAGE_KEY = 'planwise_travellers';
@@ -376,6 +377,13 @@ function setCapsuleHint(text, isError = false) {
  * Reverse geocode and apply coordinates.
  */
 async function applyGpsCoordinates(latitude, longitude, adopt = true, quiet = false) {
+  const fallbackLocation = {
+    name: 'Current location',
+    label: 'Current location',
+    lat: latitude,
+    lon: longitude,
+    source: 'gps',
+  };
   try {
     const res = await apiFetch(`/geo/reverse?lat=${latitude.toFixed(5)}&lon=${longitude.toFixed(5)}`, {}, 20000);
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
@@ -386,20 +394,50 @@ async function applyGpsCoordinates(latitude, longitude, adopt = true, quiet = fa
     return gpsLocation;
   } catch (err) {
     console.warn('Reverse geocoding failed:', err);
-    if (!quiet) setCapsuleHint('Found your position but could not name it — is the backend running?', true);
-    return null;
+    gpsLocation = fallbackLocation;
+    if (adopt) setActiveLocation(gpsLocation);
+    if (!quiet) setCapsuleHint('Using your coordinates; the place name could not be loaded.', true);
+    return gpsLocation;
   }
 }
 
-// Global hook for native Android wrapper to push coordinates immediately
+function requestNativeLocation() {
+  if (nativeLocationRequest) return nativeLocationRequest.promise;
+
+  let resolveRequest;
+  let settled = false;
+  let timer;
+  const request = { promise: new Promise(resolve => { resolveRequest = resolve; }), finish: null };
+  request.finish = result => {
+    if (settled) return;
+    settled = true;
+    window.clearTimeout(timer);
+    if (nativeLocationRequest === request) nativeLocationRequest = null;
+    resolveRequest(result);
+  };
+  timer = window.setTimeout(() => {
+    request.finish({ error: 'Location request timed out. Check that device location is turned on and try again.' });
+  }, 30000);
+  nativeLocationRequest = request;
+
+  try {
+    window.AndroidLocationBridge.requestDeviceLocation();
+  } catch (err) {
+    request.finish({ error: 'Could not start the device location request.' });
+  }
+  return request.promise;
+}
+
+// Global hooks for the native Android wrapper to return a fix or an error.
 window.onNativeLocationReceived = async function(latitude, longitude, accuracy) {
   console.log('Received native location:', latitude, longitude, accuracy);
-  const loc = await applyGpsCoordinates(latitude, longitude, true, true);
-  btnLocate.classList.remove('is-busy');
-  if (btnChipLocate) {
-    btnChipLocate.disabled = false;
-    btnChipLocate.textContent = loc ? '📍 Use my current location' : '⚠️ Location unavailable — type a city';
+  if (nativeLocationRequest) {
+    nativeLocationRequest.finish({ latitude, longitude, accuracy });
   }
+};
+
+window.onNativeLocationError = function(message) {
+  if (nativeLocationRequest) nativeLocationRequest.finish({ error: message || 'Location is unavailable.' });
 };
 
 /**
@@ -417,23 +455,19 @@ function detectCurrentLocation({ adopt = true, quiet = false } = {}) {
     if (!quiet) setCapsuleHint('Finding your location…');
     btnLocate.classList.add('is-busy');
 
-    // 1. Check Native Android Bridge first if available
+    // Android requests location through the native permission and location APIs.
+    // Do not also call navigator.geolocation here: that creates a second prompt
+    // and can race the native callback in WebView.
     if (window.AndroidLocationBridge) {
-      try {
-        const raw = window.AndroidLocationBridge.getDeviceLocation();
-        if (raw) {
-          const parsed = JSON.parse(raw);
-          if (parsed && typeof parsed.lat === 'number' && typeof parsed.lon === 'number') {
-            const loc = await applyGpsCoordinates(parsed.lat, parsed.lon, adopt, quiet);
-            btnLocate.classList.remove('is-busy');
-            resolve(loc);
-            return;
-          }
-        }
-        window.AndroidLocationBridge.requestDeviceLocation();
-      } catch (err) {
-        console.warn('Native location bridge error:', err);
+      const result = await requestNativeLocation();
+      btnLocate.classList.remove('is-busy');
+      if (result && typeof result.latitude === 'number' && typeof result.longitude === 'number') {
+        resolve(await applyGpsCoordinates(result.latitude, result.longitude, adopt, quiet));
+      } else {
+        if (!quiet) setCapsuleHint(result?.error || 'Could not get your location — type a city instead.', true);
+        resolve(null);
       }
+      return;
     }
 
     // 2. Query HTML5 Geolocation with automatic low -> high accuracy fallback
@@ -489,7 +523,8 @@ function detectCurrentLocation({ adopt = true, quiet = false } = {}) {
 
 /** Use the current position automatically on first load, without nagging. */
 async function initLocation() {
-  if (restoreLocation()) return;
+  const restored = restoreLocation();
+  if (restored && activeLocation?.source !== 'gps') return;
   await detectCurrentLocation({ adopt: true, quiet: true });
   if (!activeLocation) {
     setCapsuleHint('Tip: tap 📍 to use your current location, or type any city.');
