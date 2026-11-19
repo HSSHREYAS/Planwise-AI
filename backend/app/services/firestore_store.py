@@ -47,11 +47,15 @@ def save_session(uid: str, state: PlanState) -> None:
         "created_at": state.created_at.isoformat(),
         "updated_at": datetime.now(timezone.utc),
     }
-    _user_ref(uid).collection("sessions").document(state.session_id).set(session_doc)
+    _user_ref(uid).collection("sessions").document(state.session_id).set(
+        session_doc, retry=None, timeout=10,
+    )
 
 
 def load_session(uid: str, session_id: str) -> Optional[PlanState]:
-    snapshot = _user_ref(uid).collection("sessions").document(session_id).get()
+    snapshot = _user_ref(uid).collection("sessions").document(session_id).get(
+        retry=None, timeout=10,
+    )
     if not snapshot.exists:
         return None
     data = snapshot.to_dict() or {}
@@ -79,7 +83,7 @@ def list_sessions(uid: str) -> List[Dict[str, Any]]:
     snapshots = (
         _user_ref(uid).collection("sessions")
         .order_by("updated_at", direction=firestore.Query.DESCENDING)
-        .stream()
+        .stream(retry=None, timeout=10)
     )
     results = []
     for snapshot in snapshots:
@@ -100,7 +104,9 @@ def list_sessions(uid: str) -> List[Dict[str, Any]]:
 
 
 def get_profile(uid: str) -> Dict[str, Any]:
-    snapshot = _user_ref(uid).collection("private").document("profile").get()
+    snapshot = _user_ref(uid).collection("private").document("profile").get(
+        retry=None, timeout=10,
+    )
     return snapshot.to_dict() if snapshot.exists else {}
 
 
@@ -111,5 +117,5 @@ def save_profile(uid: str, values: Dict[str, Any]) -> Dict[str, Any]:
         "updated_at": datetime.now(timezone.utc),
     }
     # A merge preserves any existing creation metadata without an extra read.
-    ref.set(profile, merge=True, timeout=25)
+    ref.set(profile, merge=True, retry=None, timeout=15)
     return profile

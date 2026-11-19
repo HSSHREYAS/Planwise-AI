@@ -84,13 +84,6 @@ class SessionService:
             self._owners[state.session_id] = owner_uid
         return True
 
-    def discard_session(self, session_id: str) -> None:
-        """Remove a newly-created session if durable storage could not save it."""
-        with self._lock:
-            self._sessions.pop(session_id, None)
-            self._versions.pop(session_id, None)
-            self._owners.pop(session_id, None)
-
     # ── Running requests ────────────────────────────────────────
 
     def _run(

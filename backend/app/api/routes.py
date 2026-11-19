@@ -210,12 +210,20 @@ def create_session(
 ):
     """POST /api/v1/sessions - create a new planning session."""
     session_id = session_service.create_session(owner_uid=user["uid"])
-    try:
-        _persist_session(session_id, user["uid"])
-    except HTTPException:
-        session_service.discard_session(session_id)
-        raise
+    # Keep session startup independent of Firestore. The first durable snapshot
+    # is written after a conversation has actually been created.
     return SessionCreateResponse(session_id=session_id, status="active")
+
+
+def _persist_response_session(session_id: str, uid: str, response) -> None:
+    """Persist history without discarding a completed planner response on failure."""
+    try:
+        _persist_session(session_id, uid)
+    except HTTPException as exc:
+        logger.warning("Planner response is ready but session history was not saved: %s", exc.detail)
+        response.context["persistence_warning"] = (
+            "Your answer is ready, but this conversation could not be saved to history."
+        )
 
 
 @router.get("/sessions")
@@ -292,7 +300,7 @@ def send_message(
     logger.info(f"Message received for session {session_id}: '{message[:80]}'")
     response = session_service.handle_message(session_id, message, context, request.request_id)
     if response.status.value != "cancelled":
-        _persist_session(session_id, user["uid"])
+        _persist_response_session(session_id, user["uid"], response)
     return response.model_dump()
 
 
@@ -350,5 +358,5 @@ def replan(
     logger.info(f"Replan request for session {session_id}: {request.changes}")
     response = session_service.replan(session_id, request.changes)
     if response.status.value != "cancelled":
-        _persist_session(session_id, user["uid"])
+        _persist_response_session(session_id, user["uid"], response)
     return response.model_dump()

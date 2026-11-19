@@ -1744,6 +1744,11 @@ function appendAssistantMessage(text, responseData) {
     html += `<div class="message-note">ℹ️ ${escapeHtml(notice)}</div>`;
   }
 
+  const persistenceWarning = responseData.context && responseData.context.persistence_warning;
+  if (persistenceWarning) {
+    html += `<div class="message-note is-warning">⚠️ ${escapeHtml(persistenceWarning)}</div>`;
+  }
+
   if (responseData.plan) {
     // phones / tablets: jump straight to the plan tab (hidden on wide screens)
     html += '<button type="button" class="view-plan-btn">📋 View full plan &amp; budget</button>';
