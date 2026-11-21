@@ -161,7 +161,14 @@ def geo_reverse(
     """GET /api/v1/geo/reverse - name the user's current location."""
     place = geocoder.reverse(lat, lon)
     if place is None:
-        raise HTTPException(status_code=502, detail="Could not resolve this location right now")
+        place = Place(
+            name="Current location",
+            display_name=f"{lat:.4f}, {lon:.4f}",
+            lat=float(lat),
+            lon=float(lon),
+            kind="current_location",
+            radius_m=5000,
+        )
     _prefetch(place)
     return _place_response(place)
 

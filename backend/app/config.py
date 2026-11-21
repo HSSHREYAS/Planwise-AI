@@ -54,7 +54,7 @@ LLM_MAX_RETRIES = int(os.getenv("LLM_MAX_RETRIES", "2"))
 
 # ── Live location data (OpenStreetMap, free, no key) ────────────
 NOMINATIM_URL = os.getenv("NOMINATIM_URL", "https://nominatim.openstreetmap.org")
-GEO_USER_AGENT = os.getenv("GEO_USER_AGENT", "PlanWiseAI/2.0 (trip planning assistant)")
+GEO_USER_AGENT = os.getenv("GEO_USER_AGENT", "PlanWiseAI/2.0 (trip planning assistant; https://planwise-ai-bqcm.onrender.com; contact: planwise.app@gmail.com)")
 GEO_TIMEOUT = int(os.getenv("GEO_TIMEOUT", "25"))
 
 # Retrieval (bundled Cambridge dataset)

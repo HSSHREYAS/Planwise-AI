@@ -171,11 +171,11 @@ def search(query: str, limit: int = 5) -> List[Place]:
         items = _request("/search", {"q": query, "limit": max(limit, 8)})
     except Exception as e:
         logger.warning(f"Geocoding failed for '{query}': {e}")
-        return []
+        items = []
 
     places: List[Place] = []
     index_by_key: Dict[Any, int] = {}
-    for item in items:
+    for item in (items or []):
         try:
             place = _to_place(item)
         except (KeyError, TypeError, ValueError):
@@ -190,6 +190,9 @@ def search(query: str, limit: int = 5) -> List[Place]:
             continue
         index_by_key[dedupe_key] = len(places)
         places.append(place)
+
+    if not places:
+        places = _openmeteo_search(query, limit=limit)
 
     places = places[:limit]
     for place in places:
@@ -217,8 +220,8 @@ def reverse(lat: float, lon: float) -> Optional[Place]:
         return _cache[key]
 
     # Keep reverse lookup below the browser timeout. Slow Nominatim responses
-    # then leave enough time to try the fallback provider.
-    timeout = max(1, min(config.GEO_TIMEOUT, 8))
+    # then leave enough time to try the fallback providers.
+    timeout = max(1, min(config.GEO_TIMEOUT, 6))
     try:
         item = _request("/reverse", {"lat": lat, "lon": lon, "zoom": 12}, timeout=timeout)
     except Exception as e:
@@ -248,11 +251,102 @@ def reverse(lat: float, lon: float) -> Optional[Place]:
         except (KeyError, TypeError, ValueError) as e:
             logger.warning(f"Could not parse Nominatim reverse result for {lat},{lon}: {e}")
 
-    place = _photon_reverse(lat, lon, timeout)
+    # Fallback 1: BigDataCloud (fast, CDN-backed, no cloud IP block)
+    place = _bigdatacloud_reverse(lat, lon, timeout=4)
     if place is not None:
         _cache[key] = place
         remember(place)
-    return place
+        return place
+
+    # Fallback 2: Photon
+    place = _photon_reverse(lat, lon, timeout=4)
+    if place is not None:
+        _cache[key] = place
+        remember(place)
+        return place
+
+    # Fallback 3: Return a sensible coordinate-based place so caller never receives None
+    fallback = Place(
+        name="Current location",
+        display_name=f"{lat:.4f}, {lon:.4f}",
+        lat=float(lat),
+        lon=float(lon),
+        kind="current_location",
+        radius_m=5000,
+    )
+    _cache[key] = fallback
+    remember(fallback)
+    return fallback
+
+
+def _bigdatacloud_reverse(lat: float, lon: float, timeout: int = 5) -> Optional[Place]:
+    """Free client/server reverse geocoding via BigDataCloud."""
+    try:
+        response = requests.get(
+            f"https://api.bigdatacloud.net/data/reverse-geocode-client?latitude={lat}&longitude={lon}&localityLanguage=en",
+            headers={"User-Agent": config.GEO_USER_AGENT},
+            timeout=timeout,
+        )
+        response.raise_for_status()
+        data = response.json() or {}
+        locality = (
+            data.get("city") or data.get("locality") or data.get("principalSubdivision")
+        )
+        if not locality:
+            return None
+        country = str(data.get("countryName") or "")
+        state = str(data.get("principalSubdivision") or "")
+        name = str(locality).strip()
+        country_code = str(data.get("countryCode") or "").lower()
+        return Place(
+            name=name,
+            display_name=", ".join(part for part in (name, state, country) if part),
+            lat=float(lat),
+            lon=float(lon),
+            country=country,
+            country_code=country_code,
+            state=state,
+            kind="current_location",
+            radius_m=5000,
+        )
+    except Exception as e:
+        logger.warning(f"BigDataCloud reverse geocoding failed for {lat},{lon}: {e}")
+        return None
+
+
+def _openmeteo_search(query: str, limit: int = 8, timeout: int = 5) -> List[Place]:
+    """Open-Meteo geocoding fallback for autocomplete/search."""
+    try:
+        response = requests.get(
+            "https://geocoding-api.open-meteo.com/v1/search",
+            params={"name": query, "count": limit, "language": "en", "format": "json"},
+            headers={"User-Agent": config.GEO_USER_AGENT},
+            timeout=timeout,
+        )
+        response.raise_for_status()
+        results = (response.json() or {}).get("results") or []
+        places: List[Place] = []
+        for item in results:
+            name = str(item.get("name") or "").strip()
+            if not name:
+                continue
+            country = str(item.get("country") or "")
+            state = str(item.get("admin1") or "")
+            places.append(Place(
+                name=name,
+                display_name=", ".join(part for part in (name, state, country) if part),
+                lat=float(item["latitude"]),
+                lon=float(item["longitude"]),
+                country=country,
+                country_code=str(item.get("country_code") or "").lower(),
+                state=state,
+                kind="city",
+                radius_m=6000,
+            ))
+        return places
+    except Exception as e:
+        logger.warning(f"Open-Meteo search failed for '{query}': {e}")
+        return []
 
 
 def _photon_reverse(lat: float, lon: float, timeout: int) -> Optional[Place]:

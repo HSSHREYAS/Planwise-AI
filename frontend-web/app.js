@@ -932,31 +932,109 @@ function setCapsuleHint(text, isError = false) {
 }
 
 /**
+ * Client-side reverse geocoding fallback (uses the browser/device connection).
+ */
+async function reverseGeocodeClient(latitude, longitude) {
+  // 1. Try BigDataCloud reverse geocode client (free, CORS-open, no key, highly reliable)
+  try {
+    const url = `https://api.bigdatacloud.net/data/reverse-geocode-client?latitude=${latitude}&longitude=${longitude}&localityLanguage=en`;
+    const res = await fetch(url, { signal: AbortSignal.timeout(6000) });
+    if (res.ok) {
+      const data = await res.json();
+      const city = data.city || data.locality || data.principalSubdivision || '';
+      const country = data.countryName || '';
+      if (city) {
+        const label = country && !city.toLowerCase().includes(country.toLowerCase()) ? `${city}, ${country}` : city;
+        return {
+          name: city,
+          label,
+          lat: latitude,
+          lon: longitude,
+          country,
+          country_code: (data.countryCode || '').toLowerCase(),
+          source: 'gps',
+        };
+      }
+    }
+  } catch (err) {
+    console.warn('Client BigDataCloud reverse geocode failed:', err);
+  }
+
+  // 2. Try Photon reverse geocoding
+  try {
+    const url = `https://photon.komoot.io/reverse?lat=${latitude}&lon=${longitude}&lang=en&limit=1`;
+    const res = await fetch(url, { signal: AbortSignal.timeout(6000) });
+    if (res.ok) {
+      const data = await res.json();
+      const props = data?.features?.[0]?.properties;
+      if (props) {
+        const city = props.city || props.town || props.village || props.municipality || props.suburb || props.district || props.county || props.name || '';
+        const country = props.country || '';
+        if (city) {
+          const label = country && !city.toLowerCase().includes(country.toLowerCase()) ? `${city}, ${country}` : city;
+          return {
+            name: city,
+            label,
+            lat: latitude,
+            lon: longitude,
+            country,
+            country_code: (props.countrycode || '').toLowerCase(),
+            source: 'gps',
+          };
+        }
+      }
+    }
+  } catch (err) {
+    console.warn('Client Photon reverse geocode failed:', err);
+  }
+
+  return null;
+}
+
+/**
  * Reverse geocode and apply coordinates.
  */
 async function applyGpsCoordinates(latitude, longitude, adopt = true, quiet = false) {
+  let resolvedPlace = null;
+
+  // 1. Try backend reverse geocode endpoint first
+  try {
+    const res = await apiFetch(`/geo/reverse?lat=${latitude.toFixed(5)}&lon=${longitude.toFixed(5)}`, {}, 12000);
+    if (res.ok) {
+      const place = await res.json();
+      if (place && place.name && place.name !== 'Current location') {
+        resolvedPlace = { name: place.name, label: place.label || place.name, lat: place.lat, lon: place.lon, source: 'gps' };
+      }
+    }
+  } catch (err) {
+    console.warn('Backend reverse geocoding failed:', err);
+  }
+
+  // 2. If backend couldn't name the place, resolve directly via client-side geocoding
+  if (!resolvedPlace) {
+    resolvedPlace = await reverseGeocodeClient(latitude, longitude);
+  }
+
+  // 3. Successfully resolved a locality name
+  if (resolvedPlace) {
+    gpsLocation = resolvedPlace;
+    if (adopt) setActiveLocation(gpsLocation);
+    if (!quiet) setCapsuleHint(`Using your current location: ${resolvedPlace.label}`);
+    return gpsLocation;
+  }
+
+  // 4. Fallback only if device is completely offline and all lookups failed
   const fallbackLocation = {
     name: 'Current location',
-    label: 'Current location',
+    label: `Current location (${latitude.toFixed(2)}, ${longitude.toFixed(2)})`,
     lat: latitude,
     lon: longitude,
     source: 'gps',
   };
-  try {
-    const res = await apiFetch(`/geo/reverse?lat=${latitude.toFixed(5)}&lon=${longitude.toFixed(5)}`, {}, 35000);
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    const place = await res.json();
-    gpsLocation = { name: place.name, label: place.label, lat: place.lat, lon: place.lon, source: 'gps' };
-    if (adopt) setActiveLocation(gpsLocation);
-    if (!quiet) setCapsuleHint(`Using your current location: ${place.label}`);
-    return gpsLocation;
-  } catch (err) {
-    console.warn('Reverse geocoding failed:', err);
-    gpsLocation = fallbackLocation;
-    if (adopt) setActiveLocation(gpsLocation);
-    if (!quiet) setCapsuleHint('Using your coordinates; the place name could not be loaded.', true);
-    return gpsLocation;
-  }
+  gpsLocation = fallbackLocation;
+  if (adopt) setActiveLocation(gpsLocation);
+  if (!quiet) setCapsuleHint(`Using your coordinates (${latitude.toFixed(2)}, ${longitude.toFixed(2)})`);
+  return gpsLocation;
 }
 
 function requestNativeLocation() {
