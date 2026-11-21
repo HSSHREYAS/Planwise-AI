@@ -283,6 +283,16 @@ function showAuthSetupIssue(message, note = '') {
   setAuthMessage(message, true);
 }
 
+function promiseWithTimeout(promise, timeoutMs, message) {
+  let timer;
+  return Promise.race([
+    promise,
+    new Promise((_, reject) => {
+      timer = setTimeout(() => reject(new Error(message)), timeoutMs);
+    }),
+  ]).finally(() => clearTimeout(timer));
+}
+
 function friendlyAuthError(error) {
   const messages = {
     'auth/invalid-email': 'Enter a valid email address.',
@@ -433,10 +443,10 @@ async function initializeFirebaseAuth() {
       }
 
       const sdkVersion = '13.3.0';
-      const [appSdk, authSdk] = await Promise.all([
+      const [appSdk, authSdk] = await promiseWithTimeout(Promise.all([
         import(`https://www.gstatic.com/firebasejs/${sdkVersion}/firebase-app.js`),
         import(`https://www.gstatic.com/firebasejs/${sdkVersion}/firebase-auth.js`),
-      ]);
+      ]), 15000, 'Firebase sign-in SDK took too long to load.');
       const app = appSdk.getApps().length ? appSdk.getApp() : appSdk.initializeApp(setup.firebase);
       firebaseAuth = authSdk.getAuth(app);
       firebaseAuthSdk = authSdk;
@@ -448,26 +458,37 @@ async function initializeFirebaseAuth() {
       authRetry.hidden = true;
       authSetupNote.hidden = true;
 
-      await new Promise(resolve => {
+      await new Promise((resolve, reject) => {
         let initialState = true;
-        firebaseAuthSdk.onAuthStateChanged(firebaseAuth, user => {
+        let settled = false;
+        let unsubscribe = null;
+        const timer = setTimeout(() => {
+          if (settled) return;
+          settled = true;
+          initialState = false;
+          unsubscribe?.();
+          reject(new Error('Firebase sign-in did not finish initializing.'));
+        }, 15000);
+        const finish = error => {
+          if (!initialState || settled) return;
+          settled = true;
+          initialState = false;
+          clearTimeout(timer);
+          if (error) reject(error);
+          else resolve();
+        };
+        unsubscribe = firebaseAuthSdk.onAuthStateChanged(firebaseAuth, user => {
           applyAuthState(user);
-          if (initialState) {
-            initialState = false;
-            resolve();
-          }
-        }, () => {
-          showAuthSetupIssue('Could not restore your Firebase sign-in. Try again.');
-          if (initialState) {
-            initialState = false;
-            resolve();
-          }
-        });
+          finish();
+        }, finish);
       });
     } catch (error) {
       console.error('Firebase sign-in setup failed:', error);
+      const message = String(error?.message || '');
       showAuthSetupIssue(
-        'Could not load secure sign-in. Check your connection and Firebase configuration.',
+        message.includes('too long') || message.includes('did not finish')
+          ? 'Secure sign-in is taking too long to connect. Check your connection and tap Retry.'
+          : 'Could not load secure sign-in. Check your connection and Firebase configuration.',
       );
     } finally {
       authRetry.disabled = false;

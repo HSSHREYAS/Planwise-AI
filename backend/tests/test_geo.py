@@ -58,6 +58,27 @@ class TestGeocoderHelpers:
         assert geocoder.search("a") == []
         assert geocoder.search("") == []
 
+    def test_photon_search_maps_geojson_to_place(self, monkeypatch):
+        class FakeResponse:
+            def raise_for_status(self):
+                pass
+
+            def json(self):
+                return {"features": [{
+                    "geometry": {"coordinates": [77.1, 13.3]},
+                    "properties": {
+                        "name": "Tumakuru", "type": "city", "state": "Karnataka",
+                        "country": "India", "countrycode": "IN",
+                        "extent": [77.0, 13.2, 77.2, 13.4],
+                    },
+                }]}
+
+        monkeypatch.setattr(geocoder.requests, "get", lambda *args, **kwargs: FakeResponse())
+        places_found = geocoder._photon_search("Tumakuru")
+        assert places_found[0].name == "Tumakuru"
+        assert places_found[0].country_code == "in"
+        assert places_found[0].kind == "city"
+
     def test_haversine(self):
         assert geocoder.haversine_km(0, 0, 0, 0) == 0
         assert 110 < geocoder.haversine_km(0, 0, 1, 0) < 112
@@ -161,38 +182,63 @@ class TestPlacesNormalization:
                            extratags={"wikidata": "Q1"}),
             nominatim_item("A Bus Stop", "highway", "bus_stop"),
         ]
-        monkeypatch.setattr(geocoder, "category_search", lambda term, viewbox, limit=40: items)
+        monkeypatch.setattr(places, "_overpass_search", lambda domain, place, radius: items)
         monkeypatch.setattr(places, "_cache", {})
         result = places.fetch_places(MYSURU, ["attraction"])["attraction"]
         assert [r["name"] for r in result] == ["Mysore Palace", "Tiny Gallery"]
 
     def test_fetch_reports_service_failure_as_none(self, monkeypatch):
-        monkeypatch.setattr(geocoder, "category_search", lambda term, viewbox, limit=40: None)
+        calls = []
+
+        def fail(domain, place, radius):
+            calls.append(domain)
+            return None
+
+        monkeypatch.setattr(places, "_overpass_search", fail)
         monkeypatch.setattr(places, "_cache", {})
         assert places.fetch_places(MYSURU, ["hotel"]) == {"hotel": None}
+        assert places.fetch_places(MYSURU, ["hotel"]) == {"hotel": None}
+        assert calls == ["hotel"]
 
     def test_fetch_uses_cache(self, monkeypatch):
         calls = []
 
-        def fake_search(term, viewbox, limit=40):
-            calls.append(term)
+        def fake_search(domain, place, radius):
+            calls.append((domain, radius))
             return [nominatim_item("Cafe One", "amenity", "cafe")]
 
-        monkeypatch.setattr(geocoder, "category_search", fake_search)
+        monkeypatch.setattr(places, "_overpass_search", fake_search)
         monkeypatch.setattr(places, "_cache", {})
         places.fetch_places(MYSURU, ["restaurant"])
-        first = len(calls)          # 1 result < MIN_RESULTS, so a wider second search runs
-        assert calls == ["restaurant"] * first and first == 2
+        assert len(calls) == 1
+        assert calls[0][0] == "restaurant"
         places.fetch_places(MYSURU, ["restaurant"])
-        assert len(calls) == first  # served from cache
+        assert len(calls) == 1  # served from cache
+
+    def test_overpass_conversion_and_bounded_query(self):
+        item = places._overpass_item({
+            "type": "way", "id": 123,
+            "center": {"lat": 12.31, "lon": 76.65},
+            "tags": {
+                "name": "Cafe One", "amenity": "cafe", "cuisine": "indian",
+                "addr:street": "Palace Road", "addr:city": "Mysuru",
+            },
+        })
+        record = places._normalize(item, "restaurant", MYSURU)
+        query = places._overpass_query("restaurant", MYSURU, 4000)
+        assert record["name"] == "Cafe One"
+        assert record["map_url"] == "https://www.openstreetmap.org/way/123"
+        assert record["address"] == "Palace Road, Mysuru"
+        assert '"amenity"' in query and "restaurant|cafe" in query
+        assert "12." in query and "76." in query
 
     def test_public_record_hides_internal_fields(self):
         assert places.public_record({"name": "A", "_score": 3}) == {"name": "A"}
 
-    def test_viewbox_is_left_top_right_bottom(self):
-        left, top, right, bottom = (float(x) for x in places._viewbox(MYSURU, 5000).split(","))
-        assert left < MYSURU.lon < right
-        assert bottom < MYSURU.lat < top
+    def test_overpass_query_is_bounded_to_place(self):
+        query = places._overpass_query("restaurant", MYSURU, 5000)
+        assert "(12." in query and ",76." in query
+        assert '"amenity"' in query and "restaurant|cafe" in query
 
 
 class TestToolRouting:

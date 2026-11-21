@@ -57,6 +57,14 @@ NOMINATIM_URL = os.getenv("NOMINATIM_URL", "https://nominatim.openstreetmap.org"
 GEO_USER_AGENT = os.getenv("GEO_USER_AGENT", "PlanWiseAI/2.0 (trip planning assistant; https://planwise-ai-bqcm.onrender.com; contact: planwise.app@gmail.com)")
 GEO_TIMEOUT = int(os.getenv("GEO_TIMEOUT", "25"))
 
+# Overpass serves bounded OpenStreetMap POI queries. Keep these configurable so
+# deployments can use a regional or self-hosted instance if needed.
+OVERPASS_URL = os.getenv("OVERPASS_URL", "https://overpass-api.de/api/interpreter").strip()
+OVERPASS_FALLBACK_URL = os.getenv(
+    "OVERPASS_FALLBACK_URL", "https://overpass.private.coffee/api/interpreter"
+).strip()
+OVERPASS_TIMEOUT = int(os.getenv("OVERPASS_TIMEOUT", "18"))
+
 # Retrieval (bundled Cambridge dataset)
 RETRIEVAL_TOP_K = int(os.getenv("RETRIEVAL_TOP_K", "5"))
 EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "all-MiniLM-L6-v2")

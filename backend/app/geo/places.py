@@ -2,8 +2,8 @@
 PlanWise AI - Live Places Provider
 
 Fetches real hotels, restaurants, attractions and transport hubs around
-any coordinates from OpenStreetMap (Nominatim category search - free, no
-API key).
+any coordinates from OpenStreetMap via bounded Overpass queries. Nominatim
+is reserved for occasional geocoding and is not used as a POI database.
 
 Results are normalized to the same record shape the bundled Cambridge
 dataset uses (name / type / area / address / food / stars /
@@ -17,19 +17,21 @@ import re
 import time
 from typing import Any, Dict, List, Optional, Tuple
 
-from app.geo import geocoder
+import requests
+
+from app import config
 from app.geo.geocoder import Place, haversine_km
 
 logger = logging.getLogger(__name__)
 
 DOMAINS = ("hotel", "restaurant", "attraction", "transport")
 
-# domain → (search terms, max search radius in metres)
-DOMAIN_QUERIES: Dict[str, Tuple[List[str], int]] = {
-    "hotel": (["hotel"], 6000),
-    "restaurant": (["restaurant"], 4000),
-    "attraction": (["attraction", "museum", "castle"], 12000),
-    "transport": (["railway station", "bus station", "airport"], 30000),
+# domain → (legacy label list, max search radius in metres)
+DOMAIN_RADII: Dict[str, int] = {
+    "hotel": 6000,
+    "restaurant": 4000,
+    "attraction": 12000,
+    "transport": 30000,
 }
 
 _HOTEL_TYPES = {"hotel", "guest_house", "hostel", "motel", "resort", "apartment", "chalet"}
@@ -39,10 +41,23 @@ _SIGHT_TYPES = {
     "aquarium", "artwork",
 }
 
-MIN_RESULTS = 3          # fewer than this → retry with a wider search area
-WIDE_RADIUS_M = 25000
-
 CACHE_TTL_SECONDS = 3600
+FAILURE_CACHE_TTL_SECONDS = 120
+
+_DOMAIN_TAGS = {
+    "hotel": [("tourism", "hotel|guest_house|hostel|motel|resort|apartment|chalet")],
+    "restaurant": [("amenity", "restaurant|cafe|fast_food|food_court|pub|bar|biergarten")],
+    "attraction": [
+        ("tourism", "attraction|museum|gallery|viewpoint|zoo|theme_park|aquarium|artwork"),
+        ("historic", "archaeological_site|battlefield|castle|city_gate|fort|manor|memorial|monument|ruins"),
+        ("leisure", "park|garden|nature_reserve"),
+    ],
+    "transport": [
+        ("railway", "station|halt"),
+        ("amenity", "bus_station"),
+        ("aeroway", "aerodrome"),
+    ],
+}
 
 # University / college dorms are mapped as "hostel" but are not for travellers
 _STUDENT_HOUSING = re.compile(
@@ -54,16 +69,94 @@ _STUDENT_HOUSING = re.compile(
     re.IGNORECASE,
 )
 
-_cache: Dict[str, Tuple[float, List[Dict[str, Any]]]] = {}
+_cache: Dict[str, Tuple[float, Optional[List[Dict[str, Any]]]]] = {}
 
 
 # ── Helpers ─────────────────────────────────────────────────────
 
-def _viewbox(place: Place, radius_m: int) -> str:
-    """Nominatim viewbox 'left,top,right,bottom' around the place centre."""
+def _overpass_query(domain: str, place: Place, radius_m: int) -> str:
+    """Build one bounded, category-specific Overpass query."""
     dlat = radius_m / 111_000
     dlon = radius_m / (111_000 * max(math.cos(math.radians(place.lat)), 0.2))
-    return f"{place.lon - dlon},{place.lat + dlat},{place.lon + dlon},{place.lat - dlat}"
+    south = max(-90.0, place.lat - dlat)
+    north = min(90.0, place.lat + dlat)
+    west = max(-180.0, place.lon - dlon)
+    east = min(180.0, place.lon + dlon)
+    bbox = f"{south:.6f},{west:.6f},{north:.6f},{east:.6f}"
+    selectors = []
+    for key, values in _DOMAIN_TAGS[domain]:
+        selector = f'nwr["name"]["{key}"~"^({values})$"]({bbox});'
+        selectors.append(selector)
+    return f"[out:json][timeout:15];({''.join(selectors)});out center 200;"
+
+
+def _overpass_item(element: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """Adapt one Overpass element to the existing normalization format."""
+    tags = element.get("tags") or {}
+    if not isinstance(tags, dict):
+        return None
+    coordinates = element.get("center") or element
+    if coordinates.get("lat") is None or coordinates.get("lon") is None:
+        return None
+
+    category = ""
+    kind = ""
+    for key in ("tourism", "amenity", "railway", "aeroway", "historic", "leisure"):
+        if tags.get(key):
+            category, kind = key, str(tags[key])
+            break
+
+    address = {
+        "house_number": tags.get("addr:housenumber", ""),
+        "road": tags.get("addr:street", ""),
+        "suburb": tags.get("addr:suburb", ""),
+        "neighbourhood": tags.get("addr:neighbourhood", ""),
+        "city": tags.get("addr:city", ""),
+        "town": tags.get("addr:town", ""),
+        "village": tags.get("addr:village", ""),
+        "postcode": tags.get("addr:postcode", ""),
+    }
+    return {
+        "name": tags.get("name") or tags.get("name:en") or "",
+        "category": category,
+        "type": kind,
+        "lat": coordinates["lat"],
+        "lon": coordinates["lon"],
+        "importance": 0,
+        "osm_type": element.get("type", "node"),
+        "osm_id": element.get("id", ""),
+        "extratags": tags,
+        "address": address,
+    }
+
+
+def _overpass_search(domain: str, place: Place, radius_m: int) -> Optional[List[Dict[str, Any]]]:
+    """Fetch a bounded POI set; try the backup only when the primary is unavailable."""
+    query = _overpass_query(domain, place, radius_m)
+    urls = [config.OVERPASS_URL]
+    if config.OVERPASS_FALLBACK_URL and config.OVERPASS_FALLBACK_URL not in urls:
+        urls.append(config.OVERPASS_FALLBACK_URL)
+    for url in urls:
+        try:
+            response = requests.post(
+                url,
+                data={"data": query},
+                headers={"User-Agent": config.GEO_USER_AGENT},
+                timeout=config.OVERPASS_TIMEOUT,
+            )
+            response.raise_for_status()
+            payload = response.json() or {}
+            if payload.get("remark"):
+                logger.warning("Overpass returned an incomplete result: %s", str(payload["remark"])[:160])
+                return None
+            elements = payload.get("elements") or []
+            return [item for element in elements if (item := _overpass_item(element)) is not None]
+        except requests.RequestException as exc:
+            logger.warning("Overpass lookup failed at %s: %s", url, str(exc)[:160])
+        except (ValueError, TypeError, AttributeError) as exc:
+            logger.warning("Could not parse Overpass response: %s", str(exc)[:160])
+            return None
+    return None
 
 
 def _classify(item: Dict[str, Any]) -> Optional[str]:
@@ -181,8 +274,7 @@ def _normalize(item: Dict[str, Any], domain: str, place: Place) -> Optional[Dict
         if tags.get("operator"):
             record["operator"] = tags["operator"]
 
-    # Ranking: notability (Nominatim importance is derived from Wikipedia
-    # link counts) first, then documentation quality, then proximity.
+    # Rank documented places first, then prefer nearby options.
     score = importance * 25
     if tags.get("wikidata") or tags.get("wikipedia"):
         score += 3
@@ -191,7 +283,7 @@ def _normalize(item: Dict[str, Any], domain: str, place: Place) -> Optional[Dict
             score += 0.6
     if record.get("stars"):
         score += int(record["stars"]) * 0.4
-    radius_km = DOMAIN_QUERIES[domain][1] / 1000
+    radius_km = DOMAIN_RADII[domain] / 1000
     score -= min(distance, radius_km) / radius_km * 3
     record["_score"] = round(score, 3)
 
@@ -205,39 +297,24 @@ def _cache_key(domain: str, place: Place) -> str:
 
 
 def _fetch_domain(domain: str, place: Place) -> Optional[List[Dict[str, Any]]]:
-    terms, max_radius = DOMAIN_QUERIES[domain]
+    max_radius = DOMAIN_RADII[domain]
     if domain in ("hotel", "restaurant"):
         radius = min(max(place.radius_m, 2500), max_radius)
     else:
         radius = max_radius if domain == "transport" else min(max(place.radius_m, 6000), max_radius)
     found: Dict[str, Dict[str, Any]] = {}
-    any_success = False
-
-    def collect(search_radius: int) -> None:
-        nonlocal any_success
-        viewbox = _viewbox(place, search_radius)
-        for term in terms:
-            items = geocoder.category_search(term, viewbox, limit=40)
-            if items is None:
-                continue
-            any_success = True
-            for item in items:
-                if _classify(item) != domain:
-                    continue
-                record = _normalize(item, domain, place)
-                if record is None:
-                    continue
-                key = record["name"].lower()
-                if key not in found or record["_score"] > found[key]["_score"]:
-                    found[key] = record
-
-    collect(radius)
-    # Small towns and spread-out places: look further out before giving up
-    if any_success and len(found) < MIN_RESULTS and radius < WIDE_RADIUS_M:
-        collect(WIDE_RADIUS_M)
-
-    if not any_success:
+    items = _overpass_search(domain, place, radius)
+    if items is None:
         return None
+    for item in items:
+        if _classify(item) != domain:
+            continue
+        record = _normalize(item, domain, place)
+        if record is None:
+            continue
+        key = record["name"].lower()
+        if key not in found or record["_score"] > found[key]["_score"]:
+            found[key] = record
     return sorted(found.values(), key=lambda r: r["_score"], reverse=True)
 
 
@@ -255,13 +332,14 @@ def fetch_places(place: Place, domains: List[str]) -> Dict[str, Optional[List[Di
             continue
         key = _cache_key(domain, place)
         cached = _cache.get(key)
-        if cached and time.time() - cached[0] < CACHE_TTL_SECONDS:
+        cached_ttl = FAILURE_CACHE_TTL_SECONDS if cached and cached[1] is None else CACHE_TTL_SECONDS
+        if cached and time.time() - cached[0] < cached_ttl:
             result[domain] = cached[1]
             continue
 
         records = _fetch_domain(domain, place)
+        _cache[key] = (time.time(), records)
         if records is not None:
-            _cache[key] = (time.time(), records)
             logger.info(f"Live places: {len(records)} {domain} records near {place.name}")
         else:
             logger.warning(f"Live places lookup failed for {domain} near {place.name}")

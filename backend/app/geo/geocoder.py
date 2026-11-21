@@ -1,9 +1,9 @@
 """
 PlanWise AI - Geocoder
 
-Turns place names into coordinates (and back) using OpenStreetMap
-Nominatim. Free, no API key. Results are cached in memory and requests
-are throttled to respect the public service's 1 request/second policy.
+Turns place names into coordinates using Photon, with Open-Meteo as a
+search fallback. Nominatim is only a last-resort reverse-geocoding provider;
+it is not used for autocomplete or POI searches.
 """
 
 import logging
@@ -88,22 +88,6 @@ def _request(path: str, params: Dict[str, Any], timeout: Optional[int] = None) -
             _last_request_at = time.time()
 
 
-def category_search(term: str, viewbox: str, limit: int = 40) -> Optional[List[Dict[str, Any]]]:
-    """
-    Raw Nominatim search for a category term ("restaurant", "museum" ...)
-    restricted to a viewbox. Returns None when the service is unreachable.
-    """
-    try:
-        items = _request("/search", {
-            "q": term, "viewbox": viewbox, "bounded": 1,
-            "limit": limit, "extratags": 1,
-        })
-        return items if isinstance(items, list) else []
-    except Exception as e:
-        logger.warning(f"Category search '{term}' failed: {str(e)[:120]}")
-        return None
-
-
 def haversine_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
     r = 6371.0
     p1, p2 = math.radians(lat1), math.radians(lat2)
@@ -158,6 +142,7 @@ def _to_place(item: Dict[str, Any]) -> Place:
 
 def search(query: str, limit: int = 5) -> List[Place]:
     """Free-text place search (used for geocoding and autocomplete)."""
+    global _last_request_ok
     query = (query or "").strip()
     if len(query) < 2:
         return []
@@ -165,34 +150,29 @@ def search(query: str, limit: int = 5) -> List[Place]:
     if key in _cache:
         return _cache[key]
 
-    try:
-        # ask for a few extra rows: a district and the city of the same name
-        # often both match, and we want the city
-        items = _request("/search", {"q": query, "limit": max(limit, 8)})
-    except Exception as e:
-        logger.warning(f"Geocoding failed for '{query}': {e}")
-        items = []
-
-    places: List[Place] = []
+    places = _photon_search(query, limit=max(limit, 8))
+    photon_available = _last_request_ok
     index_by_key: Dict[Any, int] = {}
-    for item in (items or []):
-        try:
-            place = _to_place(item)
-        except (KeyError, TypeError, ValueError):
-            continue
+    deduped: List[Place] = []
+    for place in places:
         dedupe_key = (place.name.lower(), place.state.lower(), place.country_code)
         if dedupe_key in index_by_key:
             # Same name twice (e.g. "Udupi" the district and "Udupi" the city):
             # keep the actual settlement - a district's centre can be far from town.
-            existing = places[index_by_key[dedupe_key]]
+            existing = deduped[index_by_key[dedupe_key]]
             if place.kind in SETTLEMENT_KINDS and existing.kind not in SETTLEMENT_KINDS:
-                places[index_by_key[dedupe_key]] = place
+                deduped[index_by_key[dedupe_key]] = place
             continue
-        index_by_key[dedupe_key] = len(places)
-        places.append(place)
+        index_by_key[dedupe_key] = len(deduped)
+        deduped.append(place)
 
+    places = deduped
     if not places:
         places = _openmeteo_search(query, limit=limit)
+        if photon_available:
+            # Photon was reachable and returned no match; an unrelated
+            # Open-Meteo outage must not turn a genuine no-match into AI fallback.
+            _last_request_ok = True
 
     places = places[:limit]
     for place in places:
@@ -215,51 +195,46 @@ def geocode(query: str) -> Optional[Place]:
 
 def reverse(lat: float, lon: float) -> Optional[Place]:
     """Coordinates → nearest named locality (city / town / suburb)."""
+    global _last_request_ok
     key = f"reverse:{lat:.3f}:{lon:.3f}"
     if key in _cache:
         return _cache[key]
 
-    # Keep reverse lookup below the browser timeout. Slow Nominatim responses
-    # then leave enough time to try the fallback providers.
+    # Photon is the primary reverse service; unlike the Nominatim public
+    # endpoint it is not constrained by Nominatim's 1 request/second policy.
+    place = _photon_reverse(lat, lon, timeout=6)
+    photon_available = _last_request_ok
+    if place is not None:
+        _cache[key] = place
+        remember(place)
+        return place
+
+    # Keep Nominatim as a low-volume fallback if Photon is unavailable.
     timeout = max(1, min(config.GEO_TIMEOUT, 6))
     try:
         item = _request("/reverse", {"lat": lat, "lon": lon, "zoom": 12}, timeout=timeout)
-    except Exception as e:
-        logger.warning(f"Reverse geocoding failed for {lat},{lon}: {e}")
-        item = None
-
-    if isinstance(item, dict) and "lat" in item:
-        try:
+        if isinstance(item, dict) and "lat" in item:
             address = item.get("address") or {}
             locality = (
                 address.get("city") or address.get("town") or address.get("village")
                 or address.get("municipality") or address.get("suburb")
                 or address.get("county") or item.get("name")
             )
-            place = _to_place(item)
-            # Keep the user's exact position as the centre, named after the locality.
-            place = place.model_copy(update={
-                "name": str(locality or place.name).strip(),
+            result = _to_place(item)
+            place = result.model_copy(update={
+                "name": str(locality or result.name).strip(),
                 "lat": float(lat),
                 "lon": float(lon),
                 "kind": "current_location",
                 "radius_m": 5000,
             })
-            _cache[key] = place
-            remember(place)
-            return place
-        except (KeyError, TypeError, ValueError) as e:
-            logger.warning(f"Could not parse Nominatim reverse result for {lat},{lon}: {e}")
-
-    # Fallback 1: BigDataCloud (fast, CDN-backed, no cloud IP block)
-    place = _bigdatacloud_reverse(lat, lon, timeout=4)
-    if place is not None:
-        _cache[key] = place
-        remember(place)
-        return place
-
-    # Fallback 2: Photon
-    place = _photon_reverse(lat, lon, timeout=4)
+        else:
+            place = None
+    except Exception as exc:
+        logger.warning("Nominatim reverse fallback failed for %s,%s: %s", lat, lon, exc)
+        place = None
+        if photon_available:
+            _last_request_ok = True
     if place is not None:
         _cache[key] = place
         remember(place)
@@ -279,43 +254,66 @@ def reverse(lat: float, lon: float) -> Optional[Place]:
     return fallback
 
 
-def _bigdatacloud_reverse(lat: float, lon: float, timeout: int = 5) -> Optional[Place]:
-    """Free client/server reverse geocoding via BigDataCloud."""
+def _photon_search(query: str, limit: int = 8, timeout: int = 6) -> List[Place]:
+    """Search place names with Photon and adapt its GeoJSON to Place records."""
+    global _last_request_ok
     try:
         response = requests.get(
-            f"https://api.bigdatacloud.net/data/reverse-geocode-client?latitude={lat}&longitude={lon}&localityLanguage=en",
+            "https://photon.komoot.io/api/",
+            params={"q": query, "limit": limit, "lang": "en"},
             headers={"User-Agent": config.GEO_USER_AGENT},
             timeout=timeout,
         )
         response.raise_for_status()
-        data = response.json() or {}
-        locality = (
-            data.get("city") or data.get("locality") or data.get("principalSubdivision")
-        )
-        if not locality:
-            return None
-        country = str(data.get("countryName") or "")
-        state = str(data.get("principalSubdivision") or "")
-        name = str(locality).strip()
-        country_code = str(data.get("countryCode") or "").lower()
-        return Place(
-            name=name,
-            display_name=", ".join(part for part in (name, state, country) if part),
-            lat=float(lat),
-            lon=float(lon),
-            country=country,
-            country_code=country_code,
-            state=state,
-            kind="current_location",
-            radius_m=5000,
-        )
+        _last_request_ok = True
+        features = (response.json() or {}).get("features") or []
+        places: List[Place] = []
+        for feature in features:
+            try:
+                properties = feature.get("properties") or {}
+                coordinates = (feature.get("geometry") or {}).get("coordinates") or []
+                if len(coordinates) < 2:
+                    continue
+                name = properties.get("name") or properties.get("city") or ""
+                address = {
+                    key: properties.get(key, "")
+                    for key in (
+                        "city", "town", "village", "municipality", "suburb",
+                        "district", "county", "state", "country",
+                    )
+                }
+                address["country_code"] = properties.get("countrycode", "")
+                extent = properties.get("extent") or []
+                boundingbox = (
+                    [extent[1], extent[3], extent[0], extent[2]] if len(extent) == 4 else None
+                )
+                item = {
+                    "name": name,
+                    "display_name": ", ".join(
+                        str(value) for value in (
+                            name, properties.get("street"), properties.get("city")
+                            or properties.get("town"), properties.get("state"), properties.get("country")
+                        ) if value
+                    ),
+                    "lat": coordinates[1],
+                    "lon": coordinates[0],
+                    "addresstype": properties.get("type", ""),
+                    "address": address,
+                    "boundingbox": boundingbox,
+                }
+                places.append(_to_place(item))
+            except (AttributeError, KeyError, TypeError, ValueError):
+                continue
+        return places
     except Exception as e:
-        logger.warning(f"BigDataCloud reverse geocoding failed for {lat},{lon}: {e}")
-        return None
+        _last_request_ok = False
+        logger.warning("Photon search failed for '%s': %s", query, e)
+        return []
 
 
 def _openmeteo_search(query: str, limit: int = 8, timeout: int = 5) -> List[Place]:
     """Open-Meteo geocoding fallback for autocomplete/search."""
+    global _last_request_ok
     try:
         response = requests.get(
             "https://geocoding-api.open-meteo.com/v1/search",
@@ -324,6 +322,7 @@ def _openmeteo_search(query: str, limit: int = 8, timeout: int = 5) -> List[Plac
             timeout=timeout,
         )
         response.raise_for_status()
+        _last_request_ok = True
         results = (response.json() or {}).get("results") or []
         places: List[Place] = []
         for item in results:
@@ -345,12 +344,14 @@ def _openmeteo_search(query: str, limit: int = 8, timeout: int = 5) -> List[Plac
             ))
         return places
     except Exception as e:
+        _last_request_ok = False
         logger.warning(f"Open-Meteo search failed for '{query}': {e}")
         return []
 
 
 def _photon_reverse(lat: float, lon: float, timeout: int) -> Optional[Place]:
     """Try Photon when Nominatim is unavailable or has no matching result."""
+    global _last_request_ok
     try:
         response = requests.get(
             "https://photon.komoot.io/reverse",
@@ -359,6 +360,7 @@ def _photon_reverse(lat: float, lon: float, timeout: int) -> Optional[Place]:
             timeout=timeout,
         )
         response.raise_for_status()
+        _last_request_ok = True
         features = (response.json() or {}).get("features") or []
         if not features or not isinstance(features[0], dict):
             return None
@@ -386,6 +388,7 @@ def _photon_reverse(lat: float, lon: float, timeout: int) -> Optional[Place]:
             radius_m=5000,
         )
     except Exception as e:
+        _last_request_ok = False
         logger.warning(f"Photon reverse geocoding failed for {lat},{lon}: {e}")
         return None
 
