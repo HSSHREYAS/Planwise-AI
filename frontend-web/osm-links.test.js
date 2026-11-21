@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { openStreetMapUrl } from './osm-links.js';
+import { openStreetMapLink, openStreetMapUrl } from './osm-links.js';
 
 test('keeps an exact OpenStreetMap object link', () => {
   assert.equal(
@@ -21,6 +21,13 @@ test('searches OpenStreetMap by place and trip location when coordinates are mis
     openStreetMapUrl({ name: 'Shivagange Hill', location: 'Tumakuru, India' }),
     'https://www.openstreetmap.org/search?query=Shivagange%20Hill%2C%20Tumakuru%2C%20India',
   );
+});
+
+test('gives AI-suggested places a visible OpenStreetMap search action', () => {
+  const link = openStreetMapLink({ name: 'Bhadra Dam', location: 'Tumakuru, India' });
+  assert.equal(link.label, 'Search OpenStreetMap ↗');
+  assert.equal(link.isSearch, true);
+  assert.match(link.url, /^https:\/\/www\.openstreetmap\.org\/search\?query=/);
 });
 
 test('does not create a map link without a place, coordinates, or valid OSM URL', () => {

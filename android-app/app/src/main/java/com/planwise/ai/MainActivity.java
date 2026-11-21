@@ -65,6 +65,9 @@ public class MainActivity extends Activity {
     // Location management
     private LocationManager locationManager;
     private LocationListener activeLocationListener;
+    private boolean locationRequestActive = false;
+    private Location lastKnownLocationFallback;
+    private Runnable locationFallbackTimeout;
 
     // Pending website request for the user's location while Android asks for permission
     private String pendingGeoOrigin;
@@ -309,7 +312,7 @@ public class MainActivity extends Activity {
         // A saved location can be days old. Use it only as a fast path when it
         // still represents the device's current position; otherwise request a
         // fresh fix below.
-        if (bestLocation != null && System.currentTimeMillis() - bestTime > 15 * 60 * 1000L) {
+        if (bestLocation != null && System.currentTimeMillis() - bestTime > 5 * 60 * 1000L) {
             return null;
         }
         return bestLocation;
@@ -318,10 +321,17 @@ public class MainActivity extends Activity {
     @SuppressLint("MissingPermission")
     private void requestFreshLocation() {
         if (!hasLocationPermission() || locationManager == null) {
+            notifyWebLocationError("Allow location permission and turn on device location, then try again.");
             return;
         }
 
         stopLocationUpdates();
+        if (locationFallbackTimeout != null) {
+            handler.removeCallbacks(locationFallbackTimeout);
+            locationFallbackTimeout = null;
+        }
+        locationRequestActive = true;
+        lastKnownLocationFallback = getBestLastKnownLocation();
 
         // 2. Modern Android 11+ (API 30+): ask all enabled location providers.
         // Some devices expose only the fused provider, while others expose the
@@ -333,7 +343,10 @@ public class MainActivity extends Activity {
             }
             requested |= requestCurrentLocation(LocationManager.NETWORK_PROVIDER);
             requested |= requestCurrentLocation(LocationManager.GPS_PROVIDER);
-            if (requested) return;
+            if (requested) {
+                scheduleLocationFallback();
+                return;
+            }
         }
 
         // Fallback for API < 30 or if getCurrentLocation fails
@@ -368,10 +381,26 @@ public class MainActivity extends Activity {
         } catch (Throwable ignored) {}
 
         if (requested) {
-            handler.postDelayed(this::stopLocationUpdates, 20000L);
+            scheduleLocationFallback();
+        } else if (lastKnownLocationFallback != null) {
+            // No live provider is enabled; a recent saved fix is still useful.
+            pushLocationToWeb(lastKnownLocationFallback);
         } else {
             notifyWebLocationError("Turn on device location and try again.");
         }
+    }
+
+    private void scheduleLocationFallback() {
+        locationFallbackTimeout = () -> {
+            if (!locationRequestActive) return;
+            if (lastKnownLocationFallback != null) {
+                Log.i(TAG, "Using recent last-known location after fresh fix timed out");
+                pushLocationToWeb(lastKnownLocationFallback);
+            } else {
+                notifyWebLocationError("Could not get a GPS fix. Check that device location is on and try again.");
+            }
+        };
+        handler.postDelayed(locationFallbackTimeout, 12000L);
     }
 
     @SuppressLint("MissingPermission")
@@ -396,7 +425,13 @@ public class MainActivity extends Activity {
     }
 
     private void pushLocationToWeb(Location loc) {
-        if (loc == null || webView == null) return;
+        if (loc == null || webView == null || !locationRequestActive) return;
+        locationRequestActive = false;
+        if (locationFallbackTimeout != null) {
+            handler.removeCallbacks(locationFallbackTimeout);
+            locationFallbackTimeout = null;
+        }
+        stopLocationUpdates();
         handler.post(() -> {
             String script = String.format(Locale.US,
                     "(function(){" +
@@ -445,6 +480,12 @@ public class MainActivity extends Activity {
     }
 
     private void notifyWebLocationError(String message) {
+        locationRequestActive = false;
+        if (locationFallbackTimeout != null) {
+            handler.removeCallbacks(locationFallbackTimeout);
+            locationFallbackTimeout = null;
+        }
+        stopLocationUpdates();
         if (webView == null) return;
         String quoted = org.json.JSONObject.quote(message);
         handler.post(() -> webView.evaluateJavascript(

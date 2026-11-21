@@ -2,7 +2,7 @@
  * PlanWise AI — Frontend Application Controller
  * Multi-theme · location-aware · date-aware interactive planning
  */
-import { openStreetMapUrl } from './osm-links.js';
+import { openStreetMapLink } from './osm-links.js';
 
 // --- Configuration & API ---
 // Same origin everywhere: the Vite dev server proxies /api to the backend, and in
@@ -15,6 +15,7 @@ const API_BASE = window.location.protocol === 'file:'
 const REQUEST_TIMEOUT_MS = 180000;
 const PROFILE_REQUEST_TIMEOUT_MS = 60000;
 const MAX_TRIP_DAYS = 14;
+const GPS_FIX_MAX_AGE_MS = 5 * 60 * 1000;
 const LOCATION_STORAGE_KEY = 'planwise_location';
 
 let currentSessionId = null;
@@ -41,7 +42,13 @@ let profileReturnView = 'landing';
  */
 let activeLocation = null;
 let gpsLocation = null;
+let gpsLookupRequestId = 0;
 let nativeLocationRequest = null;
+
+function hasRecentGpsLocation() {
+  return Boolean(gpsLocation && Number.isFinite(gpsLocation.fetchedAt)
+    && Date.now() - gpsLocation.fetchedAt <= GPS_FIX_MAX_AGE_MS);
+}
 
 /** Number of people travelling; costs and budget are split between them. */
 const TRAVELLERS_STORAGE_KEY = 'planwise_travellers';
@@ -889,6 +896,7 @@ function setActiveLocation(place, { persist = true } = {}) {
     lat: place.lat,
     lon: place.lon,
     source: place.source || 'picked',
+    ...(Number.isFinite(place.fetchedAt) ? { fetchedAt: place.fetchedAt } : {}),
   } : null;
 
   if (persist) {
@@ -994,46 +1002,63 @@ async function reverseGeocodeClient(latitude, longitude) {
 /**
  * Reverse geocode and apply coordinates.
  */
-async function applyGpsCoordinates(latitude, longitude, adopt = true, quiet = false) {
-  let resolvedPlace = null;
-
-  // 1. Try backend reverse geocode endpoint first
-  try {
-    const res = await apiFetch(`/geo/reverse?lat=${latitude.toFixed(5)}&lon=${longitude.toFixed(5)}`, {}, 12000);
-    if (res.ok) {
-      const place = await res.json();
-      if (place && place.name && place.name !== 'Current location') {
-        resolvedPlace = { name: place.name, label: place.label || place.name, lat: place.lat, lon: place.lon, source: 'gps' };
-      }
-    }
-  } catch (err) {
-    console.warn('Backend reverse geocoding failed:', err);
-  }
-
-  // 2. If backend couldn't name the place, resolve directly via client-side geocoding
-  if (!resolvedPlace) {
-    resolvedPlace = await reverseGeocodeClient(latitude, longitude);
-  }
-
-  // 3. Successfully resolved a locality name
-  if (resolvedPlace) {
-    gpsLocation = resolvedPlace;
-    if (adopt) setActiveLocation(gpsLocation);
-    if (!quiet) setCapsuleHint(`Using your current location: ${resolvedPlace.label}`);
-    return gpsLocation;
-  }
-
-  // 4. Fallback only if device is completely offline and all lookups failed
-  const fallbackLocation = {
+function applyGpsCoordinates(latitude, longitude, adopt = true, quiet = false) {
+  const requestId = ++gpsLookupRequestId;
+  // Apply the GPS fix immediately. Naming it is a separate network operation;
+  // a slow geocoder must never make the app appear to ignore device location.
+  gpsLocation = {
     name: 'Current location',
-    label: `Current location (${latitude.toFixed(2)}, ${longitude.toFixed(2)})`,
+    label: `Current location (${latitude.toFixed(5)}, ${longitude.toFixed(5)})`,
     lat: latitude,
     lon: longitude,
     source: 'gps',
+    fetchedAt: Date.now(),
   };
-  gpsLocation = fallbackLocation;
   if (adopt) setActiveLocation(gpsLocation);
-  if (!quiet) setCapsuleHint(`Using your coordinates (${latitude.toFixed(2)}, ${longitude.toFixed(2)})`);
+  if (!quiet) setCapsuleHint('Location found; identifying the nearest place…');
+
+  const backendLookup = apiFetch(
+    `/geo/reverse?lat=${latitude.toFixed(5)}&lon=${longitude.toFixed(5)}`, {}, 9000,
+  ).then(async res => {
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const place = await res.json();
+    if (!place?.name || place.name === 'Current location') throw new Error('No locality in backend result');
+    return {
+      name: place.name,
+      label: place.label || place.name,
+      lat: latitude,
+      lon: longitude,
+      source: 'gps',
+    };
+  });
+  const clientLookup = reverseGeocodeClient(latitude, longitude).then(place => {
+    if (!place) throw new Error('No locality in client result');
+    return place;
+  });
+
+  // Ask providers in the background: trip planning can use the exact GPS fix
+  // right away, without waiting for a city name or a geocoder timeout.
+  Promise.any([backendLookup, clientLookup]).then(resolvedPlace => {
+    if (requestId !== gpsLookupRequestId) return;
+    const namedPlace = { ...resolvedPlace, fetchedAt: gpsLocation?.fetchedAt || Date.now() };
+    gpsLocation = namedPlace;
+    const gpsIsStillSelected = activeLocation?.source === 'gps'
+      && Math.abs(activeLocation.lat - latitude) < 0.00001
+      && Math.abs(activeLocation.lon - longitude) < 0.00001;
+    if (adopt && gpsIsStillSelected) setActiveLocation(namedPlace);
+    if (!quiet && adopt && gpsIsStillSelected) {
+      setCapsuleHint(`Using your current location: ${resolvedPlace.label}`);
+    }
+  }).catch(err => {
+    if (requestId !== gpsLookupRequestId) return;
+    console.warn('All reverse geocoding providers failed:', err);
+    const gpsIsStillSelected = activeLocation?.source === 'gps'
+      && Math.abs(activeLocation.lat - latitude) < 0.00001
+      && Math.abs(activeLocation.lon - longitude) < 0.00001;
+    if (!quiet && adopt && gpsIsStillSelected) {
+      setCapsuleHint(`Using your coordinates (${latitude.toFixed(5)}, ${longitude.toFixed(5)}); place name unavailable.`, true);
+    }
+  });
   return gpsLocation;
 }
 
@@ -1053,7 +1078,7 @@ function requestNativeLocation() {
   };
   timer = window.setTimeout(() => {
     request.finish({ error: 'Location request timed out. Check that device location is turned on and try again.' });
-  }, 30000);
+  }, 60000);
   nativeLocationRequest = request;
 
   try {
@@ -1625,8 +1650,21 @@ async function handleUserSend(text, options = {}) {
   if (!query || isWaitingResponse) return;
 
   // "near me" before we know where the user is: try to find out first
-  if (NEAR_ME.test(query) && !gpsLocation && !activeLocation) {
-    await detectCurrentLocation({ adopt: true, quiet: true });
+  if (NEAR_ME.test(query) && !hasRecentGpsLocation()) {
+    // Keep a manually chosen destination in the location chip, but still get
+    // device GPS for requests that explicitly say "near me".
+    const previousChoice = activeLocation;
+    const found = await detectCurrentLocation({
+      adopt: !previousChoice || previousChoice.source === 'gps',
+      quiet: false,
+    });
+    if (!found && (!previousChoice || previousChoice.source === 'gps')) {
+      setCapsuleHint('I could not get your live location. Allow location access or choose a place, then try again.', true);
+      return;
+    }
+    if (!found && previousChoice) {
+      setCapsuleHint(`Live location is unavailable; using your selected place: ${previousChoice.label}.`, true);
+    }
   }
 
   chatInput.value = '';
@@ -1873,10 +1911,12 @@ function renderResultCard(r, domain) {
   if (r.phone) details.push(`<div>📞 ${escapeHtml(r.phone)}</div>`);
 
   const links = [];
-  const mapUrl = safeUrl(r.map_url) || openStreetMapUrl({
+  const mapLink = safeUrl(r.map_url)
+    ? { url: safeUrl(r.map_url), label: 'OpenStreetMap ↗' }
+    : openStreetMapLink({
     lat: r.lat, lon: r.lon, name: r.name, location: r.area,
   });
-  if (mapUrl) links.push(`<a href="${escapeHtml(mapUrl)}" target="_blank" rel="noopener noreferrer">View on map ↗</a>`);
+  if (mapLink) links.push(`<a href="${escapeHtml(mapLink.url)}" target="_blank" rel="noopener noreferrer">${escapeHtml(mapLink.label)}</a>`);
   const site = safeUrl(r.website);
   if (site) links.push(`<a href="${escapeHtml(site)}" target="_blank" rel="noopener noreferrer">Website ↗</a>`);
 
@@ -2043,7 +2083,9 @@ function renderItineraryDrawer(plan, validation, context) {
           cost += a.type === 'hotel' ? '/room' : ' pp';     // per room / per person
         }
         const suggested = details.source === 'ai_suggested';
-        const mapUrl = safeUrl(details.map_url) || openStreetMapUrl({
+        const mapLink = safeUrl(details.map_url)
+          ? { url: safeUrl(details.map_url), label: 'OpenStreetMap ↗' }
+          : openStreetMapLink({
           lat: details.lat,
           lon: details.lon,
           name: a.name,
@@ -2059,7 +2101,7 @@ function renderItineraryDrawer(plan, validation, context) {
             ${details.note ? `<div class="slot-note">${escapeHtml(details.note)}</div>` : ''}
             <div class="slot-meta">
               ${suggested ? '<span class="slot-tag" title="Suggested by the AI, not found in the live map data">AI suggestion</span>' : ''}
-              ${mapUrl ? `<a href="${escapeHtml(mapUrl)}" target="_blank" rel="noopener noreferrer">Map ↗</a>` : ''}
+              ${mapLink ? `<a href="${escapeHtml(mapLink.url)}" target="_blank" rel="noopener noreferrer" title="Open ${escapeHtml(a.name)} in OpenStreetMap">${escapeHtml(mapLink.label)}</a>` : ''}
             </div>
           </div>`;
       }).join('');
